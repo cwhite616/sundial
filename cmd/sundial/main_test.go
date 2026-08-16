@@ -28,7 +28,7 @@ func (o *previewOutput) WriteFrame(_ context.Context, frame render.Frame) error 
 	return nil
 }
 func (*previewOutput) Clear(context.Context) error { return nil }
-func (*previewOutput) Close() error                { return nil }
+func (*previewOutput) Close(context.Context) error { return nil }
 
 func TestStartPreviewRetriesBeforeReportingDeliveredSuccess(t *testing.T) {
 	injected := errors.New("transient")
@@ -63,5 +63,17 @@ func TestStartPreviewReturnsStartupAndTerminalFailures(t *testing.T) {
 	output := &previewOutput{failures: []error{injected, injected, injected}}
 	if _, err := startPreview(context.Background(), output, previewSafety, func(context.Context, int) error { return nil }); !errors.Is(err, injected) {
 		t.Fatalf("terminal error = %v", err)
+	}
+}
+
+func TestStartPreviewReturnsTerminalBackoffFailure(t *testing.T) {
+	writeErr := errors.New("write failed")
+	backoffErr := errors.New("backoff failed")
+	output := &previewOutput{failures: []error{writeErr}}
+	_, err := startPreview(context.Background(), output, previewSafety, func(context.Context, int) error {
+		return backoffErr
+	})
+	if !errors.Is(err, writeErr) || !errors.Is(err, backoffErr) {
+		t.Fatalf("startup error = %v", err)
 	}
 }

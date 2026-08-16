@@ -44,6 +44,7 @@ type Worker struct {
 	done      chan struct{}
 	mu        sync.Mutex
 	closed    bool
+	closeErr  error
 	once      sync.Once
 }
 
@@ -95,7 +96,7 @@ func (w *Worker) Errors() <-chan error           { return w.errors }
 func (w *Worker) Delivered() <-chan render.Frame { return w.delivered }
 func (w *Worker) Done() <-chan struct{}          { return w.done }
 
-func (w *Worker) Close() {
+func (w *Worker) Close() error {
 	w.once.Do(func() {
 		w.mu.Lock()
 		w.closed = true
@@ -107,6 +108,9 @@ func (w *Worker) Close() {
 		w.mu.Unlock()
 	})
 	<-w.done
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.closeErr
 }
 
 func (w *Worker) report(err error) {
@@ -116,11 +120,32 @@ func (w *Worker) report(err error) {
 	}
 }
 
+// reportTerminal retains lifecycle-ending errors even when nonterminal
+// notifications have filled the bounded error channel.
+func (w *Worker) reportTerminal(err error) {
+	for {
+		select {
+		case w.errors <- err:
+			return
+		default:
+		}
+		select {
+		case <-w.errors:
+		default:
+		}
+	}
+}
+
 func (w *Worker) run(output Output, options WorkerOptions) {
 	defer close(w.done)
 	defer close(w.delivered)
 	defer close(w.errors)
-	defer w.cleanup(output, options.CleanupTimeout)
+	defer func() {
+		err := w.cleanup(output, options.CleanupTimeout)
+		w.mu.Lock()
+		w.closeErr = err
+		w.mu.Unlock()
+	}()
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -134,22 +159,24 @@ func (w *Worker) run(output Output, options WorkerOptions) {
 	}
 }
 
-func (w *Worker) cleanup(output Output, timeout time.Duration) {
-	clearCtx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	clearDone := make(chan error, 1)
-	go func() { clearDone <- output.Clear(clearCtx) }()
-	select {
-	case err := <-clearDone:
-		if err != nil {
-			w.report(fmt.Errorf("clear output during shutdown: %w", err))
-		}
-	case <-clearCtx.Done():
-		w.report(fmt.Errorf("clear output during shutdown: %w", clearCtx.Err()))
+func (w *Worker) cleanup(output Output, timeout time.Duration) error {
+	var cleanupErrors []error
+	clearCtx, cancelClear := context.WithTimeout(context.Background(), timeout)
+	if err := output.Clear(clearCtx); err != nil {
+		wrapped := fmt.Errorf("clear output during shutdown: %w", err)
+		cleanupErrors = append(cleanupErrors, wrapped)
+		w.reportTerminal(wrapped)
 	}
-	if err := output.Close(); err != nil {
-		w.report(fmt.Errorf("close output during shutdown: %w", err))
+	cancelClear()
+
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), timeout)
+	if err := output.Close(closeCtx); err != nil {
+		wrapped := fmt.Errorf("close output during shutdown: %w", err)
+		cleanupErrors = append(cleanupErrors, wrapped)
+		w.reportTerminal(wrapped)
 	}
+	cancelClose()
+	return errors.Join(cleanupErrors...)
 }
 
 func (w *Worker) deliveredFrame(frame render.Frame) {
@@ -176,13 +203,25 @@ func (w *Worker) deliver(output Output, options WorkerOptions, frame render.Fram
 			return
 		}
 		terminal := attempt >= options.MaxRetries
-		w.report(&DeliveryError{Attempt: attempt + 1, Terminal: terminal, Err: err})
+		deliveryErr := &DeliveryError{Attempt: attempt + 1, Terminal: terminal, Err: err}
+		if terminal {
+			w.reportTerminal(deliveryErr)
+		} else {
+			w.report(deliveryErr)
+		}
 		if terminal {
 			return
 		}
-		if err := options.Backoff(w.ctx, attempt+1); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				w.report(fmt.Errorf("wait to retry output frame: %w", err))
+		if backoffErr := options.Backoff(w.ctx, attempt+1); backoffErr != nil {
+			if !errors.Is(backoffErr, context.Canceled) {
+				w.reportTerminal(&DeliveryError{
+					Attempt:  attempt + 1,
+					Terminal: true,
+					Err: errors.Join(
+						err,
+						fmt.Errorf("wait to retry output frame: %w", backoffErr),
+					),
+				})
 			}
 			return
 		}

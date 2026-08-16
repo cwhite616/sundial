@@ -33,36 +33,36 @@ func startPreview(ctx context.Context, output app.Output, safety render.Safety, 
 	}
 	frame, err := renderer.Render(render.ArtificialSun{Position: stripLength / 2, Color: render.Pixel{R: 255, G: 120, W: 180}})
 	if err != nil {
-		worker.Close()
+		_ = worker.Close()
 		return nil, fmt.Errorf("render preview: %w", err)
 	}
 	if err := worker.Submit(frame); err != nil {
-		worker.Close()
+		_ = worker.Close()
 		return nil, fmt.Errorf("submit preview: %w", err)
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			worker.Close()
+			_ = worker.Close()
 			return nil, fmt.Errorf("wait for preview delivery: %w", ctx.Err())
 		case delivered, ok := <-worker.Delivered():
 			if !ok {
-				worker.Close()
+				_ = worker.Close()
 				return nil, errors.New("preview worker stopped before delivery")
 			}
 			if !framesEqual(delivered, frame) {
-				worker.Close()
+				_ = worker.Close()
 				return nil, errors.New("preview delivered an unexpected frame")
 			}
 			return worker, nil
 		case workerErr, ok := <-worker.Errors():
 			if !ok {
-				worker.Close()
+				_ = worker.Close()
 				return nil, errors.New("preview worker stopped before delivery")
 			}
 			var deliveryErr *app.DeliveryError
 			if errors.As(workerErr, &deliveryErr) && deliveryErr.Terminal {
-				worker.Close()
+				_ = worker.Close()
 				return nil, fmt.Errorf("deliver preview: %w", workerErr)
 			}
 		}
@@ -102,9 +102,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer worker.Close()
 	fmt.Printf("previewed artificial sun at pixel %d of %d; press Ctrl-C to stop\n", stripLength/2, stripLength)
 	<-ctx.Done()
+	if err := worker.Close(); err != nil {
+		return fmt.Errorf("shut down preview output: %w", err)
+	}
 	return nil
 }
 

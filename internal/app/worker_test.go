@@ -67,7 +67,10 @@ func (f *fakeOutput) Clear(ctx context.Context) error {
 	f.cleared = true
 	return f.clearErr
 }
-func (f *fakeOutput) Close() error {
+func (f *fakeOutput) Close(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed = true
@@ -137,7 +140,9 @@ func TestWorkerKeepsOnlyNewestPendingFrame(t *testing.T) {
 	if values := output.values(); len(values) != 2 || values[0] != 1 || values[1] != 3 {
 		t.Fatalf("writes = %v", values)
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestWorkerRetriesNewestFrameAndSurfacesWrappedError(t *testing.T) {
@@ -174,7 +179,9 @@ func TestWorkerRetriesNewestFrameAndSurfacesWrappedError(t *testing.T) {
 	if p.R != 9 {
 		t.Fatalf("retried value = %d", p.R)
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestWorkerCancellationRejectsSubmissionAndQueuedDelivery(t *testing.T) {
@@ -198,7 +205,9 @@ func TestWorkerCancellationRejectsSubmissionAndQueuedDelivery(t *testing.T) {
 		t.Fatalf("submit after cancel = %v", err)
 	}
 	receive(t, w.Done())
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if values := output.values(); len(values) != 0 {
 		t.Fatalf("writes after cancellation = %v", values)
 	}
@@ -214,7 +223,7 @@ func TestConcurrentSubmitAndCloseIsLinearized(t *testing.T) {
 	result := make(chan error, 1)
 	closed := make(chan struct{})
 	go func() { <-start; result <- w.Submit(frame(1)) }()
-	go func() { <-start; w.Close(); close(closed) }()
+	go func() { <-start; _ = w.Close(); close(closed) }()
 	close(start)
 	receive(t, closed)
 	submitErr := receive(t, result)
@@ -234,7 +243,7 @@ func TestWorkerBoundsBlockedClearAndReportsCleanupErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.Close()
+	closeResult := w.Close()
 	var gotTimeout, gotClose bool
 	for err := range w.Errors() {
 		gotTimeout = gotTimeout || errors.Is(err, context.DeadlineExceeded)
@@ -242,6 +251,9 @@ func TestWorkerBoundsBlockedClearAndReportsCleanupErrors(t *testing.T) {
 	}
 	if !gotTimeout || !gotClose {
 		t.Fatalf("cleanup errors: timeout=%v close=%v", gotTimeout, gotClose)
+	}
+	if !errors.Is(closeResult, context.DeadlineExceeded) || !errors.Is(closeResult, closeErr) {
+		t.Fatalf("close result = %v", closeResult)
 	}
 	output.mu.Lock()
 	closed := output.closed
@@ -258,9 +270,12 @@ func TestWorkerReportsClearError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.Close()
+	closeResult := w.Close()
 	if workerErr := receive(t, w.Errors()); !errors.Is(workerErr, clearErr) {
 		t.Fatalf("clear error = %v", workerErr)
+	}
+	if !errors.Is(closeResult, clearErr) {
+		t.Fatalf("close result = %v", closeResult)
 	}
 }
 
@@ -285,5 +300,41 @@ func TestWorkerRetryIsBounded(t *testing.T) {
 	if remaining != 1 {
 		t.Fatalf("remaining failures = %d", remaining)
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkerRetainsTerminalFailureWhenErrorChannelIsFull(t *testing.T) {
+	injected := errors.New("always fails")
+	started := make(chan struct{}, 32)
+	failures := make([]error, 21)
+	for i := range failures {
+		failures[i] = injected
+	}
+	output := &fakeOutput{failures: failures, started: started}
+	w, err := NewWorker(context.Background(), output, WorkerOptions{MaxRetries: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Submit(frame(1)); err != nil {
+		t.Fatal(err)
+	}
+	for range failures {
+		receive(t, started)
+	}
+	var terminal *DeliveryError
+	for i := 0; i < cap(w.errors); i++ {
+		workerErr := receive(t, w.Errors())
+		var deliveryErr *DeliveryError
+		if errors.As(workerErr, &deliveryErr) && deliveryErr.Terminal {
+			terminal = deliveryErr
+		}
+	}
+	if terminal == nil || !errors.Is(terminal, injected) {
+		t.Fatalf("terminal error = %v", terminal)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 }

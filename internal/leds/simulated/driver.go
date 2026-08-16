@@ -55,6 +55,9 @@ func (d *Driver) WriteFrame(ctx context.Context, frame render.Frame) error {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("write simulated frame: %w", err)
+	}
 	if d.closed {
 		return ErrClosed
 	}
@@ -74,9 +77,15 @@ func (d *Driver) Clear(ctx context.Context) error {
 	return d.WriteFrame(ctx, dark)
 }
 
-func (d *Driver) Close() error {
+func (d *Driver) Close(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("close simulated LED driver: %w", err)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("close simulated LED driver: %w", err)
+	}
 	dark, _ := render.DarkFrame(d.length)
 	d.frame = dark
 	d.closed = true

@@ -131,6 +131,17 @@ func TestSafetyScalingHandlesLargeIntegerUnitsWithoutOverflow(t *testing.T) {
 	}
 }
 
+func TestEvenChannelValueUsesItsActualOverflowBoundary(t *testing.T) {
+	coefficient := uint64(math.MaxUint64 / 2)
+	current, err := channelCurrent(2, coefficient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current != coefficient*2 {
+		t.Fatalf("current = %d, want %d", current, coefficient*2)
+	}
+}
+
 func TestInvalidSafetyReturnsExactDarkFrame(t *testing.T) {
 	invalid := []Safety{
 		{},

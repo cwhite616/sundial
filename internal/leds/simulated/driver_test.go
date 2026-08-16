@@ -3,51 +3,25 @@ package simulated
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/cwhite616/sundial/internal/app"
+	"github.com/cwhite616/sundial/internal/app/outputtest"
 	"github.com/cwhite616/sundial/internal/render"
 )
 
 func TestDriverContract(t *testing.T) {
-	d, err := New(2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	input := []render.Pixel{{R: 1, G: 2, B: 3, W: 4}, {W: 5}}
-	frame := render.NewFrame(input)
-	if err := d.WriteFrame(context.Background(), frame); err != nil {
-		t.Fatal(err)
-	}
-	input[0] = render.Pixel{}
-	snapshot := d.Snapshot()
-	p, _ := snapshot.Pixel(0)
-	if p != (render.Pixel{R: 1, G: 2, B: 3, W: 4}) {
-		t.Fatalf("RGBW snapshot = %+v", p)
-	}
-	copy := snapshot.Pixels()
-	copy[0] = render.Pixel{}
-	p, _ = d.Snapshot().Pixel(0)
-	if p.R != 1 {
-		t.Fatal("snapshot storage was mutable")
-	}
-	if err := d.WriteFrame(context.Background(), render.NewFrame(make([]render.Pixel, 1))); err == nil {
-		t.Fatal("expected length rejection")
-	}
-	if err := d.Clear(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := d.Snapshot().Pixels(); got[0] != (render.Pixel{}) || got[1] != (render.Pixel{}) {
-		t.Fatalf("clear = %+v", got)
-	}
-	if err := d.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if !d.Closed() {
-		t.Fatal("driver not closed")
-	}
-	if err := d.WriteFrame(context.Background(), frame); !errors.Is(err, ErrClosed) {
-		t.Fatalf("closed write error = %v", err)
-	}
+	outputtest.Run(t, outputtest.Harness{
+		New: func(length int) (app.Output, error) { return New(length) },
+		Snapshot: func(output app.Output) render.Frame {
+			return output.(*Driver).Snapshot()
+		},
+		InjectErrors: func(output app.Output, errs ...error) {
+			output.(*Driver).InjectErrors(errs...)
+		},
+	})
 }
 
 func TestDriverInjectsErrorsAndBlockingDeterministically(t *testing.T) {
@@ -83,10 +57,36 @@ func TestDirectCloseLeavesDarkSnapshot(t *testing.T) {
 	if err := d.WriteFrame(context.Background(), render.NewFrame([]render.Pixel{{R: 255, W: 10}})); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Close(); err != nil {
+	if err := d.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if pixel, _ := d.Snapshot().Pixel(0); pixel != (render.Pixel{}) {
 		t.Fatalf("closed snapshot = %+v", pixel)
+	}
+}
+
+type cancelAfterFirstCheck struct{ checks atomic.Int32 }
+
+func (c *cancelAfterFirstCheck) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelAfterFirstCheck) Done() <-chan struct{}       { return nil }
+func (c *cancelAfterFirstCheck) Value(any) any               { return nil }
+func (c *cancelAfterFirstCheck) Err() error {
+	if c.checks.Add(1) > 1 {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestDriverRechecksCancellationBeforeCommittingFrame(t *testing.T) {
+	d, _ := New(1)
+	gate := make(chan struct{})
+	close(gate)
+	d.SetWriteGate(gate)
+	err := d.WriteFrame(&cancelAfterFirstCheck{}, render.NewFrame([]render.Pixel{{R: 255}}))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("write error = %v", err)
+	}
+	if pixel, _ := d.Snapshot().Pixel(0); pixel != (render.Pixel{}) {
+		t.Fatalf("canceled write committed %+v", pixel)
 	}
 }

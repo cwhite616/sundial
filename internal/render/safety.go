@@ -37,7 +37,10 @@ func (s Safety) validate() error {
 }
 
 func channelCurrent(value uint8, coefficient uint64) (uint64, error) {
-	if coefficient > math.MaxUint64/uint64(value|1) {
+	if value == 0 {
+		return 0, nil
+	}
+	if coefficient > math.MaxUint64/uint64(value) {
 		return 0, fmt.Errorf("%w: channel current calculation overflows", ErrInvalidSafety)
 	}
 	return uint64(value) * coefficient, nil
