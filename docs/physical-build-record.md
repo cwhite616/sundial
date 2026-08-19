@@ -7,7 +7,8 @@
 - Strip: 144 SK6812 RGBW pixels, configured as GRBW on BCM GPIO18 (physical pin 12).
 - Native binding: `github.com/rpi-ws281x/rpi-ws281x-go` v1.0.10.
 - Native timing: library defaults, 800 kHz output frequency and DMA channel 10.
-- Native brightness ceiling: 96/255.
+- Native driver brightness: 255/255. This avoids the target binding's no-output behavior at 96; it does not replace renderer safety.
+- Centralized renderer brightness ceiling: 96/255, applied to every composed frame before native delivery.
 - Power: one shared 5 V/2.5 A supply feeding the Pi through header pins 2 (5 V) and 6 (ground), with a common strip ground.
 - Software strip-current budget: 500 mA. The renderer uses 20 coefficient units per channel step and a 127,500-unit budget (`500 * 255`) for each 20 mA-at-full-scale R/G/B/W channel model.
 - Startup/shutdown: initialize with a dark render; on shutdown attempt another dark render before releasing the native driver.
@@ -71,3 +72,10 @@ Hardware verification was not available during implementation. On the target, re
 - Root cause: a portable-composition type assertion lived in the target-independent `main_test.go`, so it also ran where the native composition was selected.
 - Correction: the simulator type, identity, and exact-length assertions now live in `output_portable_test.go` under the exact portable build constraint. Target-independent strip-length and safety assertions remain in `main_test.go`; ARM and ARM64 retain build-tagged native identity coverage.
 - Acceptance impact: the application never reached hardware during this attempt. All physical channel, current, and shutdown observations remain pending.
+
+## Native-brightness target finding: 2026-08-19
+
+- Observation: with native driver brightness 96/255, the corrected physical adapter initialized but the LEDs did not illuminate. Charlie manually changed native brightness to 255/255 on the Pi and confirmed that the LEDs illuminated.
+- Root cause: the application coupled the native driver's brightness setting to the renderer's 96/255 safety ceiling. On this target/binding combination, native brightness 96 produced no visible output, preventing physical verification.
+- Approved correction: native driver brightness is now 255/255, while the independent centralized renderer ceiling remains 96/255 and the strip-current budget remains 127,500 coefficient units (500 mA modeled). Every frame is still safety-transformed before native delivery.
+- Acceptance impact: illumination confirms that the native output path can energize the strip. Individual R/G/B/W order, measured current, and fail-dark shutdown observations remain pending.

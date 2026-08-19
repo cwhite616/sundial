@@ -15,13 +15,14 @@ import (
 )
 
 const (
-	stripLength      = 144
-	driverBrightness = 96
+	stripLength               = 144
+	nativeDriverBrightness    = 255
+	rendererBrightnessCeiling = 96
 )
 
 var previewSafety = render.Safety{
 	RedCurrent: 20, GreenCurrent: 20, BlueCurrent: 20, WhiteCurrent: 20,
-	MaxStripCurrent: 127_500, BrightnessCeiling: driverBrightness,
+	MaxStripCurrent: 127_500, BrightnessCeiling: rendererBrightnessCeiling,
 }
 
 func startPreview(ctx context.Context, output app.Output, safety render.Safety, backoff app.Backoff) (*app.Worker, error) {
