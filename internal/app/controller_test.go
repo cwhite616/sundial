@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,10 @@ type controlledStore struct {
 	results chan error
 	once    sync.Once
 }
+
+type nilStoreFunc func(context.Context, DeviceState) error
+
+func (f nilStoreFunc) Save(ctx context.Context, state DeviceState) error { return f(ctx, state) }
 
 func newControlledStore() *controlledStore {
 	return &controlledStore{calls: make(chan DeviceState, 8), results: make(chan error, 8)}
@@ -166,6 +171,65 @@ func TestControllerCancellationDoesNotLeakBlockedCallersOrPartiallyAdopt(t *test
 	case <-closed:
 	case <-time.After(time.Second):
 		t.Fatal("controller close blocked")
+	}
+}
+
+func TestControllerSkipsCanceledQueuedReplacement(t *testing.T) {
+	store := newControlledStore()
+	controller, err := NewController(context.Background(), mustState(t, 0, "UTC", 1, 8), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+
+	firstResult := replaceAsync(controller, Replacement{PreferredZone: "America/Detroit", StripLength: 10, Points: testPoints(t, 2, 7)})
+	receiveCall(t, store)
+	queuedContext, cancelQueued := context.WithCancel(context.Background())
+	queuedResult := make(chan error, 1)
+	go func() {
+		queuedResult <- controller.Replace(queuedContext, Replacement{PreferredZone: "Europe/London", StripLength: 10, Points: testPoints(t, 3, 6)})
+	}()
+	assertNoCall(t, store)
+	cancelQueued()
+	if err := <-queuedResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("queued result = %v; want context cancellation", err)
+	}
+	store.results <- nil
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+	assertNoCall(t, store)
+	state, err := controller.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Revision() != 1 || state.PreferredZone() != "America/Detroit" {
+		t.Fatalf("canceled queued state adopted: revision=%d zone=%q", state.Revision(), state.PreferredZone())
+	}
+}
+
+func TestControllerRejectsRevisionExhaustionWithoutStoreCall(t *testing.T) {
+	store := newControlledStore()
+	controller, err := NewController(context.Background(), mustState(t, math.MaxUint64, "UTC", 1, 8), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	if err := controller.Replace(context.Background(), Replacement{PreferredZone: "America/Detroit", StripLength: 10, Points: testPoints(t, 2, 7)}); !errors.Is(err, ErrRevisionExhausted) {
+		t.Fatalf("replacement error = %v; want ErrRevisionExhausted", err)
+	}
+	assertNoCall(t, store)
+	state, err := controller.Snapshot(context.Background())
+	if err != nil || state.Revision() != math.MaxUint64 {
+		t.Fatalf("snapshot = revision %d, error %v", state.Revision(), err)
+	}
+}
+
+func TestControllerRejectsTypedNilStore(t *testing.T) {
+	var store nilStoreFunc
+	controller, err := NewController(context.Background(), mustState(t, 0, "UTC", 1, 8), store)
+	if !errors.Is(err, ErrNilStore) || controller != nil {
+		t.Fatalf("controller, error = %v, %v; want nil, ErrNilStore", controller, err)
 	}
 }
 
