@@ -63,3 +63,11 @@ Hardware verification was not available during implementation. On the target, re
 - Root cause: `github.com/rpi-ws281x/rpi-ws281x-go` uses `github.com/pkg/errors` transitively, but the module lock did not yet include that indirect requirement and its complete checksums. Portable host builds had not compiled the target-only native dependency and therefore did not expose the incomplete lock.
 - Correction: `go mod tidy` added `github.com/pkg/errors v0.9.1 // indirect` and completed `go.sum`. Host tests, cgo-disabled tests, vet, diff checks, and `GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go list -deps ./cmd/sundial` then passed.
 - Acceptance impact: the process never reached the native driver, so this run provides no valid channel, current, or shutdown observation. All physical observations remain pending.
+
+## Failed target pre-run test: 2026-08-19
+
+- Reported platform: `GOOS=linux GOARCH=arm64 CGO_ENABLED=1` on the Raspberry Pi target.
+- Observation: `sudo /usr/local/go/bin/go test ./...` failed `TestPortableCompositionUsesSafeExactLengthSimulator` because native composition correctly returned an `*rpiws281x.Driver`, while the untagged test required a `*simulated.Driver`. The application was not run.
+- Root cause: a portable-composition type assertion lived in the target-independent `main_test.go`, so it also ran where the native composition was selected.
+- Correction: the simulator type, identity, and exact-length assertions now live in `output_portable_test.go` under the exact portable build constraint. Target-independent strip-length and safety assertions remain in `main_test.go`; ARM and ARM64 retain build-tagged native identity coverage.
+- Acceptance impact: the application never reached hardware during this attempt. All physical channel, current, and shutdown observations remain pending.
