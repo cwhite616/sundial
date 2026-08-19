@@ -17,6 +17,70 @@ The software limits are conservative controls, not electrical certification. Ver
 
 When powering through the Pi header, do not simultaneously power the Pi from USB. Use wiring and fusing appropriate to the shared supply and expected fault current. Retain a common ground, suitable logic-level shifting, data-line protection, and power buffering. These precautions reduce risk but do not constitute electrical certification.
 
+## Acceptance-setup revisions
+
+Every physical experiment must name one acceptance-setup revision. A revision is an immutable record of the conditions that could affect shadow position, readability, or electrical safety; corrections are added as notes or captured in a new revision rather than silently overwriting the original observation.
+
+Create a new revision whenever any of these materially changes:
+
+- mount geometry, including LED height, radius, active spacing, alignment, or orientation;
+- the reference viewing position;
+- the ambient-light regime;
+- the supply, common-ground arrangement, signal conditioning, data-line protection, power buffering, or supply protection; or
+- the configured current limit, renderer brightness ceiling, native brightness, strip configuration, or output geometry definition.
+
+Results from different revisions are not directly comparable. A comparison may describe a qualitative difference, but it must identify both revisions and the changed conditions. Photos are supplemental evidence only; measurements and written observations remain required.
+
+Use millimetres for physical dimensions and measure them from these references:
+
+- **Height:** perpendicular distance from the sundial's dial plane to the center of the active LED emitter.
+- **Radius:** straight-line distance in the dial plane from the gnomon's base to the active LED emitter's projected center.
+- **Active spacing:** center-to-center distance between adjacent active LED emitters, measured along the mounted strip.
+- **Alignment/orientation:** identify pixel-number direction and record the active emitter's position relative to the gnomon's base and dial plane.
+- **Viewing position:** record eye height and horizontal displacement from the gnomon's base, plus viewing direction. Mark the floor or support so it can be reproduced.
+
+### AS-2026-08-19-R0 — assembled; acceptance pending
+
+This revision records Charlie's approximate measurements and observations of the assembled prototype together with the attributable electrical evidence established by the accepted hardware verification below. Continued supervised prototyping is authorized, but this revision is **not finally accepted**: the planned logic-level shifter has not yet been installed or inspected, and the CanaKit supply's rating and protection details have not been established. Unknown fields are intentionally not inferred from planned hardware or software configuration.
+
+| Field | Attributable value / status |
+| --- | --- |
+| Date / observer | 2026-08-19 / Charlie |
+| Temporary construction and attachment | Prototype assembled on a roughly 18 in (approximately 457 mm) wood-block base. A half-circle wire support runs end-to-end; about 120 LEDs are taped to the wire and the remaining approximately 24 lie on the wood. No permanent alteration of the cast-iron sundial was reported; attachment/removability still requires final inspection. Wood differs from the planned cardboard/foam-core material and must be reviewed at final acceptance. |
+| Independent adjustment | LED tape on wire is temporary, but independent adjustability of height, radius, active spacing, and alignment has not yet been demonstrated or inspected. |
+| Strip and output | 144 SK6812 RGBW pixels, GRBW order, BCM GPIO18 (physical pin 12) |
+| Active LED count and spacing | About 120 of 144 LEDs mounted on the wire arc; remainder lie on the wood base. Strip density is 144 LEDs/m, implying a nominal pitch of approximately 6.94 mm; actual mounted center-to-center spacing has not been measured. Single-pixel previews illuminate one LED at a time. |
+| Height | Arc reported approximately 18 in (approximately 457 mm) high; exact height from dial plane to active-emitter center remains unmeasured. |
+| Radius | Arc reported about 18 in (approximately 457 mm) from the gnomon; exact radius from gnomon base to projected active-emitter center remains unmeasured. |
+| Alignment / orientation | Half-circle wire runs end-to-end and is angled about 20 degrees from perpendicular. The gnomon's low point is at the circle center and its high point points away from the circle. Preview uses zero-based pixel 72. Pixel-number direction and the reference used for the reported 20-degree angle remain undocumented. |
+| Reference viewing position | Charlie observed that the sundial sits at the lamp base and that the shadow appears the same from any viewing angle. This is an observation for this setup, not a claim that viewing angle is universally irrelevant. A measured reproducible eye position has not been recorded. |
+| Representative test marks / times | Dial marks `IV`, `II`, `XII`, `X`, and `VIII`; corresponding civil test times/time zone have not been recorded. |
+| Ambient-light conditions | Room light; fixture state, sources, intensity, and time of observation were not recorded. |
+| Supply | CanaKit supply feeding the Pi. The earlier fixed configuration records a shared 5 V / 2.5 A supply, but the observed CanaKit unit's rating, strip-feed arrangement, and protection details have not been independently recorded or inspected for this revision. |
+| Common ground | Reported installed; arrangement pending final inspection. |
+| Signal conditioning / level shifting | Not installed. A level shifter is expected 2026-08-20; final acceptance remains pending until installation and inspection. |
+| Data-line protection | 330 ohm data resistor reported installed; placement pending final inspection. |
+| Power buffering | 1000 µF capacitor reported installed; voltage rating, polarity, and placement pending final inspection. |
+| Configured strip-current limit | 500 mA modeled maximum; 127,500 coefficient units |
+| Renderer / native brightness | Renderer ceiling 96/255; native driver 255/255 |
+
+#### Initial single-position illumination check
+
+The existing bounded physical preview was observed in room light. Pixel 72 was illuminated red and dedicated white during the Story 1.2 diagnostic sequence; no gnomon shadow was observable under that condition. The missing level shifter prevents final acceptance, but Charlie has authorized continued supervised prototyping until it is installed and inspected.
+
+| Observation | Result |
+| --- | --- |
+| Revision / pixel | AS-2026-08-19-R0 / zero-based pixel 72 |
+| Requested preview color | Story 1.2 diagnostic red (`R=255`) and dedicated white (`W=255`), each before centralized safety scaling |
+| Delivered color / brightness | Each diagnostic channel value was 96 after the 96/255 renderer ceiling; native brightness 255/255 |
+| Current evidence | 7.53 mA per diagnostic, conservatively modeled and not measured |
+| Visible gnomon shadow | Not observable in the lit room for the pixel-72 red/white diagnostic. Charlie separately reports that a shadow is observable with the [linked gist test](https://gist.github.com/cwhite616/3951cb66186fabc42f66ece8877d8ea5), but its exact pixel, color, brightness, width, ambient conditions, and setup revision were not provided, so that report cannot replace this attributable check or be directly compared with it. |
+| Reflections | Unknown; not reported |
+| Diffusion | Unknown; not reported |
+| Shadow softness | Unknown; not reported |
+| Ambient-light limitations | A shadow was not observable under the reported room-light condition; light sources and intensity were not measured. |
+| Calibration constraints / lessons | The bounded red/white diagnostic is insufficient for Calibration under the reported room light. Capture the successful gist-test settings and conditions before using its visible shadow as evidence. Final acceptance additionally requires the level shifter and inspection of all protection and attachment details. |
+
 ## Provisional palette
 
 Values use the adapter's `WWRRGGBB` packed representation. They are diagnostic starting points, not calibrated product colors; centralized safety scaling may uniformly reduce them.
