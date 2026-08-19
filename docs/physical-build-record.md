@@ -34,8 +34,8 @@ Hardware verification was not available during implementation. On the target, re
 1. Run `sudo /usr/local/go/bin/go test ./...` and record the result.
 2. Confirm the strip is dark before starting the process.
 3. Run `sudo /usr/local/go/bin/go run ./cmd/sundial`. Startup automatically holds individually bounded red, green, blue, and dedicated-white frames for 750 ms each, then leaves the provisional Red Sun preview active. Record whether each physical channel matches the configured GRBW order.
-5. Press Ctrl-C, confirm the strip becomes dark, and record any clear or release error.
-6. Record measured current, viewing limitations, unexpected flicker/color, and any mismatch. Do not accept the story if a channel mismatch, over-budget measurement, or fail-dark shutdown problem is observed.
+4. Press Ctrl-C, confirm the strip becomes dark, and record any clear or release error.
+5. Record measured current, viewing limitations, unexpected flicker/color, and any mismatch. Do not accept the story if a channel mismatch, over-budget measurement, or fail-dark shutdown problem is observed.
 
 | Check | Observation |
 | --- | --- |
@@ -55,3 +55,11 @@ Hardware verification was not available during implementation. On the target, re
 - Root cause: the native adapter build constraint admitted only `linux/arm`; `linux/arm64` selected the portable simulator. The original `_linux_arm.go` filenames also imposed an implicit ARM-only filename constraint. The completion message did not identify the active output mode, so it falsely implied physical verification.
 - Correction: explicitly tagged, architecture-neutral `_linux_rpi.go` files make both `linux/arm` and `linux/arm64` with cgo select the native adapter. Startup prints the selected output mode. The portable path explicitly states that no physical verification occurred.
 - Acceptance impact: this run provides no valid channel, current, or shutdown observation. All physical observations remain pending until the corrected binary is run on the target.
+
+## Failed dependency-lock target run: 2026-08-19
+
+- Reported platform: `GOOS=linux GOARCH=arm64 CGO_ENABLED=1` on the Raspberry Pi target.
+- Observation: the corrected native build stopped during compilation, before hardware initialization, because dependency metadata for `github.com/pkg/errors` was missing.
+- Root cause: `github.com/rpi-ws281x/rpi-ws281x-go` uses `github.com/pkg/errors` transitively, but the module lock did not yet include that indirect requirement and its complete checksums. Portable host builds had not compiled the target-only native dependency and therefore did not expose the incomplete lock.
+- Correction: `go mod tidy` added `github.com/pkg/errors v0.9.1 // indirect` and completed `go.sum`. Host tests, cgo-disabled tests, vet, diff checks, and `GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go list -deps ./cmd/sundial` then passed.
+- Acceptance impact: the process never reached the native driver, so this run provides no valid channel, current, or shutdown observation. All physical observations remain pending.
