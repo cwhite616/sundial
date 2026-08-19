@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cwhite616/sundial/internal/app"
+	"github.com/cwhite616/sundial/internal/clock"
 	"github.com/cwhite616/sundial/internal/render"
 )
 
@@ -215,5 +218,103 @@ func TestStartPreviewReturnsTerminalBackoffFailure(t *testing.T) {
 	})
 	if !errors.Is(err, writeErr) || !errors.Is(err, backoffErr) {
 		t.Fatalf("startup error = %v", err)
+	}
+}
+
+func TestTuningSequenceEvaluatesZoneExactBetweenAndMidnightTrials(t *testing.T) {
+	detroit, err := time.LoadLocation("America/Detroit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(hour, minute int) clock.TimeOfDay {
+		value, err := clock.NewTimeOfDay(hour, minute, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	calibration, err := clock.NewCalibration(stripLength, []clock.CalibrationPoint{
+		{Time: at(1, 0), Pixel: 20},
+		{Time: at(8, 0), Pixel: 100},
+		{Time: at(10, 0), Pixel: 80},
+		{Time: at(23, 0), Pixel: 40},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These are absolute instants; Detroit local time is UTC-4 on this date.
+	trials := []tuningTrial{
+		{ID: "exact", Instant: time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC), Color: render.Pixel{W: 255}},
+		{ID: "descending-between", Instant: time.Date(2026, 8, 19, 13, 0, 0, 0, time.UTC), Color: render.Pixel{W: 255}},
+		{ID: "midnight", Instant: time.Date(2026, 8, 20, 4, 0, 0, 0, time.UTC), Color: render.Pixel{W: 255}},
+	}
+	output := &previewOutput{}
+	var results []tuningResult
+	worker, err := startTuningSequence(context.Background(), output, previewSafety, nil, calibration, detroit, trials, func(result tuningResult) error {
+		results = append(results, result)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	wantPositions := []int{100, 90, 30}
+	for i, result := range results {
+		if result.ID != trials[i].ID || result.Position != wantPositions[i] {
+			t.Fatalf("result %d = %+v, want id %q position %d", i, result, trials[i].ID, wantPositions[i])
+		}
+		pixel, pixelErr := result.Frame.Pixel(result.Position)
+		if pixelErr != nil || pixel != (render.Pixel{W: 96}) || result.Frame.Len() != stripLength {
+			t.Fatalf("result %d unsafe or malformed frame: len=%d pixel=%+v err=%v", i, result.Frame.Len(), pixel, pixelErr)
+		}
+	}
+	if results[0].IntervalFrom != results[0].IntervalTo || results[1].CrossesMidnight || !results[2].CrossesMidnight {
+		t.Fatalf("interval attribution: exact=%+v between=%+v midnight=%+v", results[0], results[1], results[2])
+	}
+}
+
+func TestTuningSequenceFailsDarkWithContext(t *testing.T) {
+	pointA, _ := clock.NewTimeOfDay(8, 0, 0, 0)
+	pointB, _ := clock.NewTimeOfDay(10, 0, 0, 0)
+	calibration, err := clock.NewCalibration(stripLength, []clock.CalibrationPoint{{Time: pointA, Pixel: 10}, {Time: pointB, Pixel: 20}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trial := []tuningTrial{{ID: "exact", Instant: time.Date(2026, 8, 19, 8, 0, 0, 0, time.UTC), Color: render.Pixel{R: 255}}}
+
+	output := &previewOutput{}
+	_, err = startTuningSequence(context.Background(), output, previewSafety, nil, calibration, nil, trial, nil)
+	if !errors.Is(err, clock.ErrInvalidLocation) || !strings.Contains(err.Error(), `evaluate trial "exact"`) {
+		t.Fatalf("location error = %v", err)
+	}
+	output.mu.Lock()
+	clears, closes := output.clears, output.closes
+	output.mu.Unlock()
+	if clears != 1 || closes != 1 {
+		t.Fatalf("location cleanup: clears=%d closes=%d", clears, closes)
+	}
+
+	output = &previewOutput{}
+	_, err = startTuningSequence(context.Background(), output, previewSafety, nil, clock.Calibration{}, time.UTC, trial, nil)
+	if !errors.Is(err, clock.ErrInvalidStripLength) || !strings.Contains(err.Error(), `evaluate trial "exact"`) {
+		t.Fatalf("calibration error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	output = &previewOutput{}
+	_, err = startTuningSequence(ctx, output, previewSafety, nil, calibration, time.UTC, trial, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+
+	diagnosticErr := errors.New("record failed")
+	output = &previewOutput{}
+	_, err = startTuningSequence(context.Background(), output, previewSafety, nil, calibration, time.UTC, trial, func(tuningResult) error { return diagnosticErr })
+	if !errors.Is(err, diagnosticErr) {
+		t.Fatalf("diagnostic error = %v", err)
 	}
 }
