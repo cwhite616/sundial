@@ -15,7 +15,7 @@ var (
 )
 
 // Replacement is an unmaterialized request to replace all durable device
-// state. Points is copied only when the controller processes the request.
+// state. The controller copies Points before admitting the request.
 type Replacement struct {
 	PreferredZone string
 	StripLength   int
