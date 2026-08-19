@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cwhite616/sundial/internal/app"
+	"github.com/cwhite616/sundial/internal/clock"
 	"github.com/cwhite616/sundial/internal/render"
 )
 
@@ -24,6 +25,92 @@ const (
 var previewSafety = render.Safety{
 	RedCurrent: 20, GreenCurrent: 20, BlueCurrent: 20, WhiteCurrent: 20,
 	MaxStripCurrent: 127_500, BrightnessCeiling: rendererBrightnessCeiling,
+}
+
+type tuningTrial struct {
+	ID      string
+	Instant time.Time
+	Color   render.Pixel
+}
+
+type tuningResult struct {
+	ID              string
+	Effective       time.Time
+	LocalTime       clock.TimeOfDay
+	Position        int
+	IntervalFrom    clock.CalibrationPoint
+	IntervalTo      clock.CalibrationPoint
+	CrossesMidnight bool
+	RequestedColor  render.Pixel
+	Frame           render.Frame
+}
+
+type tuningDiagnostic func(tuningResult) error
+
+// startTuningSequence evaluates a finite, caller-supplied set of attributable
+// absolute instants. The caller retains responsibility for using an accepted
+// physical setup revision and recording human observations before tuning.
+func startTuningSequence(ctx context.Context, output app.Output, safety render.Safety, backoff app.Backoff, calibration clock.Calibration, location *time.Location, trials []tuningTrial, diagnostic tuningDiagnostic) (*app.Worker, error) {
+	renderer, err := render.New(stripLength, safety)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("initialize tuning renderer: %w", err), closeUnownedOutput(output))
+	}
+	worker, err := app.NewWorker(ctx, output, app.WorkerOptions{MaxRetries: 2, Backoff: backoff})
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("initialize tuning worker: %w", err), closeUnownedOutput(output))
+	}
+	for index, trial := range trials {
+		if err := ctx.Err(); err != nil {
+			return nil, failTuning(worker, fmt.Errorf("trial %d %q canceled: %w", index, trial.ID, err))
+		}
+		if trial.ID == "" {
+			return nil, failTuning(worker, fmt.Errorf("trial %d: empty identifier", index))
+		}
+		effective, position, err := clock.NewFixedTimeline(trial.Instant).Evaluate(time.Time{}, calibration, location)
+		if err != nil {
+			return nil, failTuning(worker, fmt.Errorf("evaluate trial %q: %w", trial.ID, err))
+		}
+		frame, err := renderer.Render(render.ArtificialSun{Position: position, Color: trial.Color})
+		if err != nil {
+			return nil, failTuning(worker, fmt.Errorf("render trial %q: %w", trial.ID, err))
+		}
+		if err := worker.Submit(frame); err != nil {
+			return nil, failTuning(worker, fmt.Errorf("submit trial %q: %w", trial.ID, err))
+		}
+		if err := waitForDelivery(ctx, worker, frame); err != nil {
+			return nil, failTuning(worker, fmt.Errorf("trial %q: %w", trial.ID, err))
+		}
+		if diagnostic != nil {
+			localTime := clock.TimeOfDayFromTime(effective.In(location))
+			from, to, crossesMidnight := tuningInterval(calibration, localTime)
+			result := tuningResult{ID: trial.ID, Effective: effective, LocalTime: localTime, Position: position, IntervalFrom: from, IntervalTo: to, CrossesMidnight: crossesMidnight, RequestedColor: trial.Color, Frame: frame}
+			if err := diagnostic(result); err != nil {
+				return nil, failTuning(worker, fmt.Errorf("record trial %q diagnostic: %w", trial.ID, err))
+			}
+		}
+	}
+	return worker, nil
+}
+
+func tuningInterval(calibration clock.Calibration, value clock.TimeOfDay) (clock.CalibrationPoint, clock.CalibrationPoint, bool) {
+	for _, point := range calibration.Points() {
+		if value == point.Time {
+			return point, point, false
+		}
+	}
+	for _, pair := range calibration.CyclicPairs() {
+		if !pair.CrossesMidnight && value.Duration() > pair.From.Time.Duration() && value.Duration() < pair.To.Time.Duration() {
+			return pair.From, pair.To, false
+		}
+		if pair.CrossesMidnight && (value.Duration() > pair.From.Time.Duration() || value.Duration() < pair.To.Time.Duration()) {
+			return pair.From, pair.To, true
+		}
+	}
+	return clock.CalibrationPoint{}, clock.CalibrationPoint{}, false
+}
+
+func failTuning(worker *app.Worker, cause error) error {
+	return errors.Join(cause, worker.Close())
 }
 
 func startPreview(ctx context.Context, output app.Output, safety render.Safety, backoff app.Backoff) (*app.Worker, error) {
