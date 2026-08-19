@@ -45,6 +45,9 @@ func TestCalibrationRejectsInvalidInputs(t *testing.T) {
 		want   error
 	}{
 		{"strip", 0, []CalibrationPoint{{a, 0}, {b, 1}}, ErrInvalidStripLength},
+		{"negative strip", -1, []CalibrationPoint{{a, 0}, {b, 1}}, ErrInvalidStripLength},
+		{"nil points", 2, nil, ErrTooFewCalibrationPoints},
+		{"empty points", 2, []CalibrationPoint{}, ErrTooFewCalibrationPoints},
 		{"count", 2, []CalibrationPoint{{a, 0}}, ErrTooFewCalibrationPoints},
 		{"duplicate", 2, []CalibrationPoint{{a, 0}, {a, 1}}, ErrDuplicateCalibrationTime},
 		{"negative pixel", 2, []CalibrationPoint{{a, -1}, {b, 1}}, ErrPixelOutOfRange},
@@ -78,5 +81,17 @@ func TestCalibrationAcceptsExactlyTwoPointsAtStripEdges(t *testing.T) {
 	pairs := calibration.CyclicPairs()
 	if len(pairs) != 2 || pairs[0].CrossesMidnight || !pairs[1].CrossesMidnight || pairs[1].From != points[1] || pairs[1].To != points[0] {
 		t.Fatalf("pairs = %#v", pairs)
+	}
+}
+
+func TestCalibrationAcceptsRepeatedPixels(t *testing.T) {
+	a, b := mustTOD(t, 1, 0), mustTOD(t, 2, 0)
+	calibration, err := NewCalibration(1, []CalibrationPoint{{a, 0}, {b, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	points := calibration.Points()
+	if len(points) != 2 || points[0].Pixel != 0 || points[1].Pixel != 0 {
+		t.Fatalf("points = %#v", points)
 	}
 }

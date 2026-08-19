@@ -11,7 +11,7 @@ func TestNewTimeOfDayBounds(t *testing.T) {
 	if err != nil || valid.Duration() != 24*time.Hour-1 {
 		t.Fatalf("last instant = %v, %v", valid, err)
 	}
-	for _, fields := range [][4]int{{-1, 0, 0, 0}, {24, 0, 0, 0}, {0, 60, 0, 0}, {0, 0, 60, 0}, {0, 0, 0, 1e9}} {
+	for _, fields := range [][4]int{{-1, 0, 0, 0}, {24, 0, 0, 0}, {0, -1, 0, 0}, {0, 60, 0, 0}, {0, 0, -1, 0}, {0, 0, 60, 0}, {0, 0, 0, -1}, {0, 0, 0, 1e9}} {
 		if _, err := NewTimeOfDay(fields[0], fields[1], fields[2], fields[3]); !errors.Is(err, ErrInvalidTimeOfDay) {
 			t.Errorf("fields %v error = %v", fields, err)
 		}
@@ -19,7 +19,10 @@ func TestNewTimeOfDayBounds(t *testing.T) {
 }
 
 func TestTimeOfDayFromTimeUsesLocalFields(t *testing.T) {
-	location, _ := time.LoadLocation("America/New_York")
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
 	first := time.Date(2025, 11, 2, 5, 30, 0, 123, time.UTC).In(location)
 	second := first.Add(time.Hour)
 	if first.Format("15:04") != "01:30" || second.Format("15:04") != "01:30" {
