@@ -2,7 +2,11 @@
 
 package main
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
 
 func TestNativeCompositionIdentifiesPhysicalOutput(t *testing.T) {
 	if !physicalPreviewOutput {
@@ -13,5 +17,10 @@ func TestNativeCompositionIdentifiesPhysicalOutput(t *testing.T) {
 	}
 	if nativeDriverBrightness != 255 || rendererBrightnessCeiling != 96 {
 		t.Fatalf("brightness controls: native=%d renderer=%d", nativeDriverBrightness, rendererBrightnessCeiling)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := selectedDiagnosticHold()(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("physical diagnostic hold cancellation = %v", err)
 	}
 }

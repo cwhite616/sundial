@@ -173,6 +173,32 @@ func TestInitializationCancellationAfterInitialDarkRenderClearsAndReleases(t *te
 	}
 }
 
+func TestCanceledCloseStillAttemptsDarkBeforeRelease(t *testing.T) {
+	b := &fakeBackend{}
+	d, err := newFake(context.Background(), 2, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(b.frames)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = d.Close(canceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled close error = %v", err)
+	}
+	if len(b.frames) != before+1 {
+		t.Fatalf("dark renders after canceled close = %d, want 1", len(b.frames)-before)
+	}
+	for _, pixel := range b.frames[len(b.frames)-1] {
+		if pixel != 0 {
+			t.Fatalf("canceled close rendered energized pixel %08X", pixel)
+		}
+	}
+	if b.releaseCalls != 1 {
+		t.Fatalf("release calls = %d, want 1", b.releaseCalls)
+	}
+}
+
 func TestNativeConfigurationAndBufferValidation(t *testing.T) {
 	config, err := newNativeConfig(144, 255)
 	if err != nil {

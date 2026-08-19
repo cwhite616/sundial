@@ -113,8 +113,11 @@ func (d *Driver) Close(ctx context.Context) error {
 	d.closed = true
 	var errs []error
 	if err := ctx.Err(); err != nil {
-		errs = append(errs, fmt.Errorf("clear rpi-ws281x LED driver before release: %w", err))
-	} else if err := d.backend.Render(make([]uint32, d.length)); err != nil {
+		errs = append(errs, fmt.Errorf("close rpi-ws281x LED driver: %w", err))
+	}
+	// Fail-dark takes priority during shutdown. The native binding does not
+	// accept a context, so this best-effort render may outlive cancellation.
+	if err := d.backend.Render(make([]uint32, d.length)); err != nil {
 		errs = append(errs, fmt.Errorf("render dark rpi-ws281x frame before release: %w", err))
 	}
 	if err := d.backend.Release(); err != nil {

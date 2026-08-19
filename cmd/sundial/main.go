@@ -179,7 +179,7 @@ func run() error {
 		return err
 	}
 	if physicalPreviewOutput {
-		fmt.Printf("completed physical bounded R/G/B/W verification sequence and previewed artificial sun at pixel %d of %d; press Ctrl-C to stop\n", stripLength/2, stripLength)
+		fmt.Printf("emitted bounded physical R/G/B/W diagnostic sequence and previewed artificial sun at pixel %d of %d; press Ctrl-C to stop\n", stripLength/2, stripLength)
 	} else {
 		fmt.Printf("completed simulated R/G/B/W sequence at pixel %d of %d; no physical verification was performed; press Ctrl-C to stop\n", stripLength/2, stripLength)
 	}
