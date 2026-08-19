@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -57,6 +58,12 @@ func TestFileLoadRejectsInvalidDocumentsWithoutPartialState(t *testing.T) {
 		{"malformed", `{`, ErrInvalidDocument},
 		{"trailing value", `{"schema_version":1,"preferred_zone":"UTC","calibration":[]} {}`, ErrInvalidDocument},
 		{"unknown field", `{"schema_version":1,"preferred_zone":"UTC","calibration":[],"extra":true}`, ErrInvalidDocument},
+		{"case variant field", `{"SCHEMA_VERSION":1,"preferred_zone":"UTC","calibration":[]}`, ErrInvalidDocument},
+		{"duplicate field", `{"schema_version":1,"schema_version":1,"preferred_zone":"UTC","calibration":[]}`, ErrInvalidDocument},
+		{"missing field", `{"schema_version":1,"preferred_zone":"UTC"}`, ErrInvalidDocument},
+		{"null field", `{"schema_version":1,"preferred_zone":null,"calibration":[]}`, ErrInvalidDocument},
+		{"wrong field type", `{"schema_version":"one","preferred_zone":"UTC","calibration":[]}`, ErrInvalidDocument},
+		{"duplicate point field", `{"schema_version":1,"preferred_zone":"UTC","calibration":[{"hour":6,"hour":7,"minute":0,"second":0,"nanosecond":0,"pixel":1},{"hour":18,"minute":0,"second":0,"nanosecond":0,"pixel":8}]}`, ErrInvalidDocument},
 		{"unsupported version", `{"schema_version":2,"preferred_zone":"UTC","calibration":[]}`, ErrUnsupportedSchema},
 		{"unknown zone", validDocument("Mars/Olympus", 1, 8), app.ErrInvalidPreferredZone},
 		{"too few points", `{"schema_version":1,"preferred_zone":"UTC","calibration":[{"hour":6,"minute":0,"second":0,"nanosecond":0,"pixel":1}]}`, clock.ErrTooFewCalibrationPoints},
@@ -81,6 +88,22 @@ func TestFileLoadRejectsInvalidDocumentsWithoutPartialState(t *testing.T) {
 				t.Fatalf("invalid document returned partial state: %+v", state)
 			}
 		})
+	}
+}
+
+func TestFileLoadPreservesJSONErrorIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "device-state.json")
+	if err := os.WriteFile(path, []byte(`{"schema_version":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := NewFile(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = storage.Load(context.Background())
+	var syntaxError *json.SyntaxError
+	if !errors.Is(err, ErrInvalidDocument) || !errors.As(err, &syntaxError) {
+		t.Fatalf("error = %v; want document sentinel and JSON syntax cause", err)
 	}
 }
 
