@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/cwhite616/sundial/internal/app"
 	"github.com/cwhite616/sundial/internal/clock"
@@ -127,6 +129,62 @@ func TestCanceledSavePreservesPriorDocument(t *testing.T) {
 	}
 	if loaded.PreferredZone() != "UTC" || loaded.Calibration().Points()[0].Pixel != 1 {
 		t.Fatalf("canceled save replaced prior state: zone=%q points=%+v", loaded.PreferredZone(), loaded.Calibration().Points())
+	}
+}
+
+type cancelOnErrCall struct {
+	mu       sync.Mutex
+	calls    int
+	cancelAt int
+	done     chan struct{}
+	once     sync.Once
+}
+
+func newCancelOnErrCall(cancelAt int) *cancelOnErrCall {
+	return &cancelOnErrCall{cancelAt: cancelAt, done: make(chan struct{})}
+}
+
+func (c *cancelOnErrCall) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelOnErrCall) Done() <-chan struct{}       { return c.done }
+func (c *cancelOnErrCall) Value(any) any               { return nil }
+func (c *cancelOnErrCall) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	if c.calls < c.cancelAt {
+		return nil
+	}
+	c.once.Do(func() { close(c.done) })
+	return context.Canceled
+}
+
+func TestCancellationDuringSavePreservesPriorDocumentAndCleansTemporaryFile(t *testing.T) {
+	for _, cancelAt := range []int{2, 3} {
+		t.Run("boundary-"+strconv.Itoa(cancelAt), func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "device-state.json")
+			storage, err := NewFile(path, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Save(context.Background(), storeState(t, 0, "UTC", 1, 8)); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Save(newCancelOnErrCall(cancelAt), storeState(t, 1, "America/Detroit", 2, 7)); !errors.Is(err, context.Canceled) {
+				t.Fatalf("save error = %v; want context cancellation", err)
+			}
+			loaded, err := storage.Load(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.PreferredZone() != "UTC" || loaded.Calibration().Points()[0].Pixel != 1 {
+				t.Fatalf("mid-save cancellation replaced prior state: zone=%q points=%+v", loaded.PreferredZone(), loaded.Calibration().Points())
+			}
+			matches, err := filepath.Glob(filepath.Join(directory, ".sundial-state-*"))
+			if err != nil || len(matches) != 0 {
+				t.Fatalf("temporary files remain: %v, %v", matches, err)
+			}
+		})
 	}
 }
 
