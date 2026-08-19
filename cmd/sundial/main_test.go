@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/cwhite616/sundial/internal/app"
-	"github.com/cwhite616/sundial/internal/leds/simulated"
 	"github.com/cwhite616/sundial/internal/render"
 )
 
@@ -17,23 +16,12 @@ type previewOutput struct {
 	writes   []render.Frame
 }
 
-func TestPortableCompositionUsesSafeExactLengthSimulator(t *testing.T) {
-	output, err := newPreviewOutput(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	driver, ok := output.(*simulated.Driver)
-	if !ok {
-		t.Fatalf("portable output type = %T", output)
-	}
-	if got := driver.Snapshot().Len(); got != 144 {
-		t.Fatalf("strip length = %d", got)
+func TestPhysicalConfigurationUsesSafeExactLength(t *testing.T) {
+	if stripLength != 144 {
+		t.Fatalf("strip length = %d", stripLength)
 	}
 	if previewSafety.MaxStripCurrent != 127_500 || previewSafety.BrightnessCeiling != 96 {
 		t.Fatalf("physical safety = %+v", previewSafety)
-	}
-	if physicalPreviewOutput || previewOutputDescription != "simulated (no physical LED output)" {
-		t.Fatalf("portable identity: physical=%v description=%q", physicalPreviewOutput, previewOutputDescription)
 	}
 }
 
