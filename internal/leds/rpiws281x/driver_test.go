@@ -15,16 +15,25 @@ type fakeBackend struct {
 	initErr, renderErr, releaseErr error
 	frames                         [][]uint32
 	initialized, released          bool
+	releaseCalls                   int
+	renderHook                     func()
 }
 
 func (b *fakeBackend) Init() error { b.initialized = true; return b.initErr }
 func (b *fakeBackend) Render(pixels []uint32) error {
 	b.frames = append(b.frames, slices.Clone(pixels))
+	if b.renderHook != nil {
+		b.renderHook()
+	}
 	err := b.renderErr
 	b.renderErr = nil
 	return err
 }
-func (b *fakeBackend) Release() error { b.released = true; return b.releaseErr }
+func (b *fakeBackend) Release() error {
+	b.released = true
+	b.releaseCalls++
+	return b.releaseErr
+}
 
 func newFake(ctx context.Context, length int, b *fakeBackend) (*Driver, error) {
 	return newDriver(ctx, length, func() (backend, error) { return b, nil })
@@ -139,5 +148,50 @@ func TestCancellationNeverRendersAndClosePreservesClearAndReleaseErrors(t *testi
 	}
 	if !b.released {
 		t.Fatal("release not attempted after clear failure")
+	}
+	secondErr := d.Close(context.Background())
+	if !errors.Is(secondErr, clearErr) || !errors.Is(secondErr, releaseErr) {
+		t.Fatalf("repeated close hid first result: %v", secondErr)
+	}
+	if b.releaseCalls != 1 {
+		t.Fatalf("release calls = %d, want 1", b.releaseCalls)
+	}
+}
+
+func TestInitializationCancellationAfterInitialDarkRenderClearsAndReleases(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	b := &fakeBackend{renderHook: cancel}
+	_, err := newFake(ctx, 2, b)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("initialization error = %v", err)
+	}
+	if len(b.frames) != 2 {
+		t.Fatalf("dark renders = %d, want initial and cleanup", len(b.frames))
+	}
+	if !b.released || b.releaseCalls != 1 {
+		t.Fatalf("release: released=%v calls=%d", b.released, b.releaseCalls)
+	}
+}
+
+func TestNativeConfigurationAndBufferValidation(t *testing.T) {
+	config, err := newNativeConfig(144, 255)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.GPIO != 18 || config.Length != 144 || config.Brightness != 255 || config.StripType != nativeStripGRBW {
+		t.Fatalf("native config = %+v", config)
+	}
+	for _, brightness := range []int{-1, 256} {
+		if _, err := newNativeConfig(144, brightness); err == nil {
+			t.Fatalf("brightness %d accepted", brightness)
+		}
+	}
+	if err := copyNativeFrame(make([]uint32, 1), make([]uint32, 2)); err == nil {
+		t.Fatal("expected native LED-buffer mismatch")
+	}
+	destination := make([]uint32, 2)
+	frame := []uint32{1, 2}
+	if err := copyNativeFrame(destination, frame); err != nil || !slices.Equal(destination, frame) {
+		t.Fatalf("copy result = %v, err = %v", destination, err)
 	}
 }

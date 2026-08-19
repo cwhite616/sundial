@@ -15,6 +15,8 @@
 
 The software limits are conservative controls, not electrical certification. Verify wiring, signal conditioning, data-line protection, power buffering, supply capability, and actual current independently before unattended use.
 
+When powering through the Pi header, do not simultaneously power the Pi from USB. Use wiring and fusing appropriate to the shared supply and expected fault current. Retain a common ground, suitable logic-level shifting, data-line protection, and power buffering. These precautions reduce risk but do not constitute electrical certification.
+
 ## Provisional palette
 
 Values use the adapter's `WWRRGGBB` packed representation. They are diagnostic starting points, not calibrated product colors; centralized safety scaling may uniformly reduce them.
@@ -28,9 +30,9 @@ Values use the adapter's `WWRRGGBB` packed representation. They are diagnostic s
 | Rain | `503000B0` |
 | Snow | `D0A0C0FF` |
 
-## Hardware verification log
+## Accepted hardware verification: 2026-08-19
 
-Hardware verification was not available during implementation. On the target, record the date, Raspbian release (`cat /etc/os-release`), architecture (`uname -m`), Go version (`/usr/local/go/bin/go version`), and the results below.
+Final verification used the corrected Linux/ARM64 native build with native brightness 255/255, centralized renderer brightness ceiling 96/255, and the unchanged 127,500-unit current budget.
 
 1. Run `sudo /usr/local/go/bin/go test ./...` and record the result.
 2. Confirm the strip is dark before starting the process.
@@ -40,14 +42,18 @@ Hardware verification was not available during implementation. On the target, re
 
 | Check | Observation |
 | --- | --- |
-| OS / architecture / Go | Pending target run |
-| Resolved frequency / DMA | Expected defaults: 800 kHz / DMA 10; confirm on target |
-| Red diagnostic | Pending target run |
-| Green diagnostic | Pending target run |
-| Blue diagnostic | Pending target run |
-| Dedicated-white diagnostic | Pending target run |
-| Ctrl-C dark shutdown | Pending target run |
-| Current and limitations | Pending measurement |
+| OS / architecture / Go | Raspbian, Linux `aarch64` / Go `linux/arm64`, Go 1.26.6 with cgo enabled |
+| Target tests | `sudo /usr/local/go/bin/go test ./...` passed |
+| Resolved frequency / DMA | Library defaults: 800 kHz / DMA 10 |
+| Pre-start state | Strip fully dark before the verification sequence |
+| Red diagnostic | Correct red displayed |
+| Green diagnostic | Correct green displayed |
+| Blue diagnostic | Correct blue displayed |
+| Dedicated-white diagnostic | Correct dedicated white displayed |
+| Final preview | Provisional Red Sun displayed |
+| Ctrl-C dark shutdown | Strip fully dark; no clear or release error |
+| Current evidence | Each diagnostic is one channel at value 96: `96 * 20 / 255 = 7.53 mA` modeled. Red Sun is W=54, R=60, G=19 after centralized scaling: `(54 + 60 + 19) * 20 / 255 = 10.43 mA` modeled. Both are below the 500 mA budget. |
+| Limitations | Current is conservatively calculated from the configured worst-case model, not physically measured. No flicker, wrong colors, or runtime errors were observed. This visual verification is not electrical certification. |
 
 ## Failed target run: 2026-08-19
 

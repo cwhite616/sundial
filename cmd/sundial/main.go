@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"reflect"
 	"syscall"
 	"time"
 
@@ -32,34 +33,50 @@ func startPreview(ctx context.Context, output app.Output, safety render.Safety, 
 func startPreviewWithHold(ctx context.Context, output app.Output, safety render.Safety, backoff app.Backoff, hold func(context.Context) error) (*app.Worker, error) {
 	renderer, err := render.New(stripLength, safety)
 	if err != nil {
-		return nil, fmt.Errorf("initialize preview renderer: %w", err)
+		return nil, errors.Join(fmt.Errorf("initialize preview renderer: %w", err), closeUnownedOutput(output))
 	}
 	worker, err := app.NewWorker(ctx, output, app.WorkerOptions{MaxRetries: 2, Backoff: backoff})
 	if err != nil {
-		return nil, fmt.Errorf("initialize preview worker: %w", err)
+		return nil, errors.Join(fmt.Errorf("initialize preview worker: %w", err), closeUnownedOutput(output))
 	}
-	for _, sun := range verificationSequence() {
-		frame, err := renderer.Render(sun)
+	for _, step := range verificationSequence() {
+		frame, err := renderer.Render(step.sun)
 		if err != nil {
-			_ = worker.Close()
-			return nil, fmt.Errorf("render preview: %w", err)
+			return nil, failPreview(worker, fmt.Errorf("render preview: %w", err))
 		}
 		if err := worker.Submit(frame); err != nil {
-			_ = worker.Close()
-			return nil, fmt.Errorf("submit preview: %w", err)
+			return nil, failPreview(worker, fmt.Errorf("submit preview: %w", err))
 		}
 		if err := waitForDelivery(ctx, worker, frame); err != nil {
-			_ = worker.Close()
-			return nil, err
+			return nil, failPreview(worker, err)
 		}
-		if sun != finalPreviewSun() {
+		if step.hold {
 			if err := hold(ctx); err != nil {
-				_ = worker.Close()
-				return nil, fmt.Errorf("hold diagnostic preview: %w", err)
+				return nil, failPreview(worker, fmt.Errorf("hold diagnostic preview: %w", err))
 			}
 		}
 	}
 	return worker, nil
+}
+
+func closeUnownedOutput(output app.Output) error {
+	if output == nil {
+		return nil
+	}
+	value := reflect.ValueOf(output)
+	if value.Kind() == reflect.Pointer && value.IsNil() {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := output.Close(ctx); err != nil {
+		return fmt.Errorf("close preview output after startup failure: %w", err)
+	}
+	return nil
+}
+
+func failPreview(worker *app.Worker, cause error) error {
+	return errors.Join(cause, worker.Close())
 }
 
 func waitForDelivery(ctx context.Context, worker *app.Worker, frame render.Frame) error {
@@ -87,14 +104,19 @@ func waitForDelivery(ctx context.Context, worker *app.Worker, frame render.Frame
 	}
 }
 
-func verificationSequence() []render.ArtificialSun {
+type verificationStep struct {
+	sun  render.ArtificialSun
+	hold bool
+}
+
+func verificationSequence() []verificationStep {
 	position := stripLength / 2
-	return []render.ArtificialSun{
-		{Position: position, Color: render.Pixel{R: 255}},
-		{Position: position, Color: render.Pixel{G: 255}},
-		{Position: position, Color: render.Pixel{B: 255}},
-		{Position: position, Color: render.Pixel{W: 255}},
-		finalPreviewSun(),
+	return []verificationStep{
+		{sun: render.ArtificialSun{Position: position, Color: render.Pixel{R: 255}}, hold: true},
+		{sun: render.ArtificialSun{Position: position, Color: render.Pixel{G: 255}}, hold: true},
+		{sun: render.ArtificialSun{Position: position, Color: render.Pixel{B: 255}}, hold: true},
+		{sun: render.ArtificialSun{Position: position, Color: render.Pixel{W: 255}}, hold: true},
+		{sun: finalPreviewSun()},
 	}
 }
 
@@ -112,6 +134,13 @@ func holdPhysicalDiagnostic(ctx context.Context) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func selectedDiagnosticHold() func(context.Context) error {
+	if physicalPreviewOutput {
+		return holdPhysicalDiagnostic
+	}
+	return func(context.Context) error { return nil }
 }
 
 func framesEqual(left, right render.Frame) bool {
@@ -135,6 +164,7 @@ func run() error {
 		return fmt.Errorf("initialize preview output: %w", err)
 	}
 	fmt.Printf("output mode: %s\n", previewOutputDescription)
+	diagnosticHold := selectedDiagnosticHold()
 	worker, err := startPreviewWithHold(ctx, driver, previewSafety, func(ctx context.Context, attempt int) error {
 		timer := time.NewTimer(time.Duration(attempt) * 25 * time.Millisecond)
 		defer timer.Stop()
@@ -144,7 +174,7 @@ func run() error {
 		case <-timer.C:
 			return nil
 		}
-	}, holdPhysicalDiagnostic)
+	}, diagnosticHold)
 	if err != nil {
 		return err
 	}

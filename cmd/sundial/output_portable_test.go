@@ -24,4 +24,9 @@ func TestPortableCompositionUsesExactLengthSimulator(t *testing.T) {
 	if physicalPreviewOutput || previewOutputDescription != "simulated (no physical LED output)" {
 		t.Fatalf("portable identity: physical=%v description=%q", physicalPreviewOutput, previewOutputDescription)
 	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := selectedDiagnosticHold()(canceled); err != nil {
+		t.Fatalf("simulator applied physical diagnostic hold: %v", err)
+	}
 }

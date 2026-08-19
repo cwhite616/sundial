@@ -14,6 +14,10 @@ type previewOutput struct {
 	mu       sync.Mutex
 	failures []error
 	writes   []render.Frame
+	clearErr error
+	closeErr error
+	clears   int
+	closes   int
 }
 
 func TestPhysicalConfigurationUsesSafeExactLength(t *testing.T) {
@@ -39,8 +43,18 @@ func (o *previewOutput) WriteFrame(_ context.Context, frame render.Frame) error 
 	o.writes = append(o.writes, render.NewFrame(frame.Pixels()))
 	return nil
 }
-func (*previewOutput) Clear(context.Context) error { return nil }
-func (*previewOutput) Close(context.Context) error { return nil }
+func (o *previewOutput) Clear(context.Context) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.clears++
+	return o.clearErr
+}
+func (o *previewOutput) Close(context.Context) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.closes++
+	return o.closeErr
+}
 
 func TestStartPreviewRetriesBeforeReportingDeliveredSuccess(t *testing.T) {
 	injected := errors.New("transient")
@@ -62,6 +76,79 @@ func TestStartPreviewRetriesBeforeReportingDeliveredSuccess(t *testing.T) {
 		if pixel != want[i] {
 			t.Fatalf("frame %d center pixel = %+v, want %+v", i, pixel, want[i])
 		}
+	}
+}
+
+func TestVerificationHoldsExactlyFourDiagnostics(t *testing.T) {
+	var holds int
+	worker, err := startPreviewWithHold(context.Background(), &previewOutput{}, previewSafety, nil, func(context.Context) error {
+		holds++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+	if holds != 4 {
+		t.Fatalf("holds = %d, want 4", holds)
+	}
+	steps := verificationSequence()
+	if len(steps) != 5 || steps[4].hold {
+		t.Fatalf("verification hold flags = %+v", steps)
+	}
+}
+
+func TestHoldFailureAndCancellationAbortAndPreserveCleanupErrors(t *testing.T) {
+	holdErr := errors.New("hold failed")
+	clearErr := errors.New("clear failed")
+	closeErr := errors.New("close failed")
+	output := &previewOutput{clearErr: clearErr, closeErr: closeErr}
+	_, err := startPreviewWithHold(context.Background(), output, previewSafety, nil, func(context.Context) error { return holdErr })
+	if !errors.Is(err, holdErr) || !errors.Is(err, clearErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("hold/cleanup error = %v", err)
+	}
+	output.mu.Lock()
+	writes, clears, closes := len(output.writes), output.clears, output.closes
+	output.mu.Unlock()
+	if writes != 1 || clears != 1 || closes != 1 {
+		t.Fatalf("cleanup state: writes=%d clears=%d closes=%d", writes, clears, closes)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	output = &previewOutput{}
+	_, err = startPreviewWithHold(ctx, output, previewSafety, nil, func(context.Context) error {
+		cancel()
+		return ctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled hold error = %v", err)
+	}
+}
+
+func TestStartupAndDeliveryFailuresPreserveCleanupErrors(t *testing.T) {
+	cleanupErr := errors.New("startup close failed")
+	invalid := previewSafety
+	invalid.MaxStripCurrent = 0
+	output := &previewOutput{closeErr: cleanupErr}
+	_, err := startPreview(context.Background(), output, invalid, nil)
+	if !errors.Is(err, render.ErrInvalidSafety) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("renderer/cleanup error = %v", err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	output = &previewOutput{closeErr: cleanupErr}
+	_, err = startPreview(canceled, output, previewSafety, nil)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("worker-startup/cleanup error = %v", err)
+	}
+
+	writeErr := errors.New("write failed")
+	clearErr := errors.New("clear failed")
+	output = &previewOutput{failures: []error{writeErr, writeErr, writeErr}, clearErr: clearErr, closeErr: cleanupErr}
+	_, err = startPreview(context.Background(), output, previewSafety, nil)
+	if !errors.Is(err, writeErr) || !errors.Is(err, clearErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("delivery/cleanup error = %v", err)
 	}
 }
 
