@@ -19,7 +19,7 @@ import (
 const (
 	stripLength               = 144
 	nativeDriverBrightness    = 255
-	rendererBrightnessCeiling = 96
+	rendererBrightnessCeiling = 255
 )
 
 var previewSafety = render.Safety{
@@ -208,8 +208,11 @@ func verificationSequence() []verificationStep {
 }
 
 func finalPreviewSun() render.ArtificialSun {
-	// Provisional Red Sun palette value 90A03500 in WWRRGGBB form.
-	return render.ArtificialSun{Position: stripLength / 2, Color: render.Pixel{W: 0x90, R: 0xA0, G: 0x35}}
+	return render.ArtificialSun{
+		Position:         stripLength / 2,
+		Color:            render.Pixel{W: 255},
+		IntensityProfile: []uint8{32, 64, 128, 255, 255, 255, 128, 64, 32},
+	}
 }
 
 func holdPhysicalDiagnostic(ctx context.Context) error {
@@ -266,7 +269,7 @@ func run() error {
 		return err
 	}
 	if physicalPreviewOutput {
-		fmt.Printf("emitted bounded physical R/G/B/W diagnostic sequence and previewed artificial sun at pixel %d of %d; press Ctrl-C to stop\n", stripLength/2, stripLength)
+		fmt.Printf("emitted bounded physical R/G/B/W diagnostic sequence and previewed nine-pixel artificial sun centered at pixel %d of %d; press Ctrl-C to stop\n", stripLength/2, stripLength)
 	} else {
 		fmt.Printf("completed simulated R/G/B/W sequence at pixel %d of %d; no physical verification was performed; press Ctrl-C to stop\n", stripLength/2, stripLength)
 	}

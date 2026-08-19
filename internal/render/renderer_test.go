@@ -36,6 +36,47 @@ func TestRenderBoundaryPositionsAndRGBWOrder(t *testing.T) {
 	}
 }
 
+func TestRenderArtificialSunIntensityProfileAndBoundaryClipping(t *testing.T) {
+	r, err := New(7, validSafety())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := []uint8{32, 64, 128, 255, 255, 255, 128, 64, 32}
+	frame, err := r.Render(ArtificialSun{Position: 3, Color: Pixel{W: 255}, IntensityProfile: profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Pixel{{W: 64}, {W: 128}, {W: 255}, {W: 255}, {W: 255}, {W: 128}, {W: 64}}
+	if got := frame.Pixels(); !pixelsEqual(got, want) {
+		t.Fatalf("profile = %+v, want %+v", got, want)
+	}
+}
+
+func TestRenderRejectsEvenIntensityProfileFailDark(t *testing.T) {
+	r, _ := New(3, validSafety())
+	frame, err := r.Render(ArtificialSun{Position: 1, Color: Pixel{W: 255}, IntensityProfile: []uint8{255, 255}})
+	if err == nil {
+		t.Fatal("expected invalid profile error")
+	}
+	for index, pixel := range frame.Pixels() {
+		if pixel != (Pixel{}) {
+			t.Fatalf("pixel %d = %+v, want dark", index, pixel)
+		}
+	}
+}
+
+func pixelsEqual(left, right []Pixel) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestFrameDoesNotAliasInputOrOutput(t *testing.T) {
 	input := []Pixel{{R: 7}}
 	frame := NewFrame(input)
@@ -81,7 +122,7 @@ func TestSafetyUniformlyAppliesBrightnessAndCurrentCeilings(t *testing.T) {
 			if test.name != "brightness" {
 				color = Pixel{255, 255, 255, 255}
 			}
-			frame, err := r.Render(ArtificialSun{0, color})
+			frame, err := r.Render(ArtificialSun{Position: 0, Color: color})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -99,7 +140,7 @@ func TestSafetyUniformlyAppliesBrightnessAndCurrentCeilings(t *testing.T) {
 
 func TestSafetyRoundingIsConservativeAndUniform(t *testing.T) {
 	s := Safety{1, 1, 1, 1, 3, 255}
-	frame, err := Render(1, s, ArtificialSun{0, Pixel{2, 1, 0, 0}})
+	frame, err := Render(1, s, ArtificialSun{Position: 0, Color: Pixel{2, 1, 0, 0}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +149,7 @@ func TestSafetyRoundingIsConservativeAndUniform(t *testing.T) {
 		t.Fatalf("unexpected no-scale result: %+v", p)
 	}
 	s.MaxStripCurrent = 2
-	frame, err = Render(1, s, ArtificialSun{0, Pixel{2, 1, 0, 0}})
+	frame, err = Render(1, s, ArtificialSun{Position: 0, Color: Pixel{2, 1, 0, 0}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +162,7 @@ func TestSafetyRoundingIsConservativeAndUniform(t *testing.T) {
 func TestSafetyScalingHandlesLargeIntegerUnitsWithoutOverflow(t *testing.T) {
 	coefficient := uint64(math.MaxUint64 / 255)
 	s := Safety{RedCurrent: coefficient, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: math.MaxUint64 - 1, BrightnessCeiling: 255}
-	frame, err := Render(1, s, ArtificialSun{0, Pixel{R: 255}})
+	frame, err := Render(1, s, ArtificialSun{Position: 0, Color: Pixel{R: 255}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +191,7 @@ func TestInvalidSafetyReturnsExactDarkFrame(t *testing.T) {
 		{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10, BrightnessCeiling: 0},
 	}
 	for _, safety := range invalid {
-		frame, err := Render(2, safety, ArtificialSun{0, Pixel{R: 255}})
+		frame, err := Render(2, safety, ArtificialSun{Position: 0, Color: Pixel{R: 255}})
 		if !errors.Is(err, ErrInvalidSafety) {
 			t.Fatalf("error = %v", err)
 		}

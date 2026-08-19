@@ -30,7 +30,7 @@ func TestPhysicalConfigurationUsesSafeExactLength(t *testing.T) {
 	if previewSafety.MaxStripCurrent != 127_500 || previewSafety.BrightnessCeiling != rendererBrightnessCeiling {
 		t.Fatalf("physical safety = %+v", previewSafety)
 	}
-	if nativeDriverBrightness != 255 || rendererBrightnessCeiling != 96 {
+	if nativeDriverBrightness != 255 || rendererBrightnessCeiling != 255 {
 		t.Fatalf("brightness controls: native=%d renderer=%d", nativeDriverBrightness, rendererBrightnessCeiling)
 	}
 }
@@ -73,7 +73,7 @@ func TestStartPreviewRetriesBeforeReportingDeliveredSuccess(t *testing.T) {
 	if len(writes) != 5 {
 		t.Fatalf("successful writes = %d", len(writes))
 	}
-	want := []render.Pixel{{R: 255}, {G: 255}, {B: 255}, {W: 255}, {W: 0x90, R: 0xA0, G: 0x35}}
+	want := []render.Pixel{{R: 255}, {G: 255}, {B: 255}, {W: 255}, {W: 255}}
 	for i, frame := range writes {
 		pixel, _ := frame.Pixel(stripLength / 2)
 		if pixel != want[i] {
@@ -184,11 +184,18 @@ func TestVerificationSequenceIsCentrallyBounded(t *testing.T) {
 			t.Fatalf("frame %d estimated current = %d, budget %d", frameIndex, estimated, previewSafety.MaxStripCurrent)
 		}
 	}
-	want := []render.Pixel{{R: 96}, {G: 96}, {B: 96}, {W: 96}, {W: 54, R: 60, G: 19}}
+	want := []render.Pixel{{R: 255}, {G: 255}, {B: 255}, {W: 255}, {W: 255}}
 	for i, frame := range writes {
 		pixel, _ := frame.Pixel(stripLength / 2)
 		if pixel != want[i] {
 			t.Fatalf("bounded frame %d = %+v, want %+v", i, pixel, want[i])
+		}
+	}
+	final := writes[len(writes)-1]
+	wantGlow := map[int]uint8{68: 32, 69: 64, 70: 128, 71: 255, 72: 255, 73: 255, 74: 128, 75: 64, 76: 32}
+	for position, pixel := range final.Pixels() {
+		if pixel != (render.Pixel{W: wantGlow[position]}) {
+			t.Fatalf("final glow pixel %d = %+v, want W=%d", position, pixel, wantGlow[position])
 		}
 	}
 }
@@ -267,7 +274,7 @@ func TestTuningSequenceEvaluatesZoneExactBetweenAndMidnightTrials(t *testing.T) 
 			t.Fatalf("result %d = %+v, want id %q position %d", i, result, trials[i].ID, wantPositions[i])
 		}
 		pixel, pixelErr := result.Frame.Pixel(result.Position)
-		if pixelErr != nil || pixel != (render.Pixel{W: 96}) || result.Frame.Len() != stripLength {
+		if pixelErr != nil || pixel != (render.Pixel{W: 255}) || result.Frame.Len() != stripLength {
 			t.Fatalf("result %d unsafe or malformed frame: len=%d pixel=%+v err=%v", i, result.Frame.Len(), pixel, pixelErr)
 		}
 	}
