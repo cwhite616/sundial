@@ -95,7 +95,7 @@ func TestFileLoadRejectsInvalidDocumentsWithoutPartialState(t *testing.T) {
 
 func TestFileLoadPreservesJSONErrorIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "device-state.json")
-	if err := os.WriteFile(path, []byte(`{"schema_version":`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"schema_version":!}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	storage, err := NewFile(path, 10)
