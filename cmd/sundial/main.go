@@ -47,6 +47,8 @@ type tuningResult struct {
 
 type tuningDiagnostic func(tuningResult) error
 
+const mappingStepHold = time.Second
+
 // startTuningSequence evaluates a finite, caller-supplied set of attributable
 // absolute instants. The caller retains responsibility for using an accepted
 // physical setup revision and recording human observations before tuning.
@@ -111,6 +113,39 @@ func tuningInterval(calibration clock.Calibration, value clock.TimeOfDay) (clock
 
 func failTuning(worker *app.Worker, cause error) error {
 	return errors.Join(cause, worker.Close())
+}
+
+func runMappingSweep(ctx context.Context, output app.Output, safety render.Safety, backoff app.Backoff, hold func(context.Context) error, diagnostic func(int)) error {
+	renderer, err := render.New(stripLength, safety)
+	if err != nil {
+		return errors.Join(fmt.Errorf("initialize mapping renderer: %w", err), closeUnownedOutput(output))
+	}
+	worker, err := app.NewWorker(ctx, output, app.WorkerOptions{MaxRetries: 2, Backoff: backoff})
+	if err != nil {
+		return errors.Join(fmt.Errorf("initialize mapping worker: %w", err), closeUnownedOutput(output))
+	}
+	for position := 0; position < stripLength; position++ {
+		frame, err := renderer.Render(mappingSun(position))
+		if err != nil {
+			return failTuning(worker, fmt.Errorf("render mapping light %d: %w", position+1, err))
+		}
+		if err := worker.Submit(frame); err != nil {
+			return failTuning(worker, fmt.Errorf("submit mapping light %d: %w", position+1, err))
+		}
+		if err := waitForDelivery(ctx, worker, frame); err != nil {
+			return failTuning(worker, fmt.Errorf("mapping light %d: %w", position+1, err))
+		}
+		if diagnostic != nil {
+			diagnostic(position + 1)
+		}
+		if err := hold(ctx); err != nil {
+			return failTuning(worker, fmt.Errorf("hold mapping light %d: %w", position+1, err))
+		}
+	}
+	if err := worker.Close(); err != nil {
+		return fmt.Errorf("finish mapping sweep: %w", err)
+	}
+	return nil
 }
 
 func startPreview(ctx context.Context, output app.Output, safety render.Safety, backoff app.Backoff) (*app.Worker, error) {
@@ -208,9 +243,13 @@ func verificationSequence() []verificationStep {
 }
 
 func finalPreviewSun() render.ArtificialSun {
+	return mappingSun(stripLength / 2)
+}
+
+func mappingSun(position int) render.ArtificialSun {
 	return render.ArtificialSun{
-		Position:         stripLength / 2,
-		Color:            render.Pixel{W: 255},
+		Position:         position,
+		Color:            render.Pixel{W: 0x90, R: 0xA0, G: 0x35},
 		IntensityProfile: []uint8{32, 64, 128, 255, 255, 255, 128, 64, 32},
 	}
 }
@@ -231,6 +270,17 @@ func selectedDiagnosticHold() func(context.Context) error {
 		return holdPhysicalDiagnostic
 	}
 	return func(context.Context) error { return nil }
+}
+
+func holdMappingStep(ctx context.Context) error {
+	timer := time.NewTimer(mappingStepHold)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func framesEqual(left, right render.Frame) bool {
@@ -254,8 +304,7 @@ func run() error {
 		return fmt.Errorf("initialize preview output: %w", err)
 	}
 	fmt.Printf("output mode: %s\n", previewOutputDescription)
-	diagnosticHold := selectedDiagnosticHold()
-	worker, err := startPreviewWithHold(ctx, driver, previewSafety, func(ctx context.Context, attempt int) error {
+	err = runMappingSweep(ctx, driver, previewSafety, func(ctx context.Context, attempt int) error {
 		timer := time.NewTimer(time.Duration(attempt) * 25 * time.Millisecond)
 		defer timer.Stop()
 		select {
@@ -264,19 +313,16 @@ func run() error {
 		case <-timer.C:
 			return nil
 		}
-	}, diagnosticHold)
+	}, holdMappingStep, func(light int) {
+		fmt.Printf("light %d\n", light)
+	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
 		return err
 	}
-	if physicalPreviewOutput {
-		fmt.Printf("emitted bounded physical R/G/B/W diagnostic sequence and previewed nine-pixel artificial sun centered at pixel %d of %d; press Ctrl-C to stop\n", stripLength/2, stripLength)
-	} else {
-		fmt.Printf("completed simulated R/G/B/W sequence at pixel %d of %d; no physical verification was performed; press Ctrl-C to stop\n", stripLength/2, stripLength)
-	}
-	<-ctx.Done()
-	if err := worker.Close(); err != nil {
-		return fmt.Errorf("shut down preview output: %w", err)
-	}
+	fmt.Printf("completed mapping sweep of %d lights; output is dark\n", stripLength)
 	return nil
 }
 
