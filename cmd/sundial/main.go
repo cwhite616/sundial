@@ -133,6 +133,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize preview output: %w", err)
 	}
+	fmt.Printf("output mode: %s\n", previewOutputDescription)
 	worker, err := startPreviewWithHold(ctx, driver, previewSafety, func(ctx context.Context, attempt int) error {
 		timer := time.NewTimer(time.Duration(attempt) * 25 * time.Millisecond)
 		defer timer.Stop()
@@ -146,7 +147,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("verified bounded R/G/B/W channels and previewed artificial sun at pixel %d of %d; press Ctrl-C to stop\n", stripLength/2, stripLength)
+	if physicalPreviewOutput {
+		fmt.Printf("completed physical bounded R/G/B/W verification sequence and previewed artificial sun at pixel %d of %d; press Ctrl-C to stop\n", stripLength/2, stripLength)
+	} else {
+		fmt.Printf("completed simulated R/G/B/W sequence at pixel %d of %d; no physical verification was performed; press Ctrl-C to stop\n", stripLength/2, stripLength)
+	}
 	<-ctx.Done()
 	if err := worker.Close(); err != nil {
 		return fmt.Errorf("shut down preview output: %w", err)

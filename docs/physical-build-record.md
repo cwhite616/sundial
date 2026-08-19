@@ -2,7 +2,7 @@
 
 ## Fixed configuration
 
-- Target: Raspberry Pi Zero W, Raspbian, 32-bit Linux/ARM, Go 1.26.6 with cgo enabled. Linux/ARM64 intentionally uses the portable simulator rather than the native adapter.
+- Target: Raspberry Pi Zero W, Raspbian, Linux/ARM or Linux/ARM64, Go 1.26.6 with cgo enabled.
 - Execution: run as root with `sudo`; the native PWM driver requires privileged hardware access.
 - Strip: 144 SK6812 RGBW pixels, configured as GRBW on BCM GPIO18 (physical pin 12).
 - Native binding: `github.com/rpi-ws281x/rpi-ws281x-go` v1.0.10.
@@ -47,3 +47,11 @@ Hardware verification was not available during implementation. On the target, re
 | Dedicated-white diagnostic | Pending target run |
 | Ctrl-C dark shutdown | Pending target run |
 | Current and limitations | Pending measurement |
+
+## Failed target run: 2026-08-19
+
+- Reported platform: `uname -m` = `aarch64`; Go selected `GOOS=linux GOARCH=arm64 CGO_ENABLED=1`.
+- Observation: the command printed a hardware-verification success message, but no LEDs illuminated.
+- Root cause: the native adapter build constraint admitted only `linux/arm`; `linux/arm64` selected the portable simulator. The original `_linux_arm.go` filenames also imposed an implicit ARM-only filename constraint. The completion message did not identify the active output mode, so it falsely implied physical verification.
+- Correction: explicitly tagged, architecture-neutral `_linux_rpi.go` files make both `linux/arm` and `linux/arm64` with cgo select the native adapter. Startup prints the selected output mode. The portable path explicitly states that no physical verification occurred.
+- Acceptance impact: this run provides no valid channel, current, or shutdown observation. All physical observations remain pending until the corrected binary is run on the target.

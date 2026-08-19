@@ -32,6 +32,9 @@ func TestPortableCompositionUsesSafeExactLengthSimulator(t *testing.T) {
 	if previewSafety.MaxStripCurrent != 127_500 || previewSafety.BrightnessCeiling != 96 {
 		t.Fatalf("physical safety = %+v", previewSafety)
 	}
+	if physicalPreviewOutput || previewOutputDescription != "simulated (no physical LED output)" {
+		t.Fatalf("portable identity: physical=%v description=%q", physicalPreviewOutput, previewOutputDescription)
+	}
 }
 
 func (o *previewOutput) WriteFrame(_ context.Context, frame render.Frame) error {
