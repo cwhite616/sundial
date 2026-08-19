@@ -34,7 +34,18 @@ func TestResolveCivilTime(t *testing.T) {
 		want  error
 	}{
 		{"invalid date", CivilTime{Year: 2025, Month: 2, Day: 29}, ErrInvalidCivilTime},
+		{"year zero", CivilTime{Year: 0, Month: 1, Day: 1}, ErrInvalidCivilTime},
+		{"month zero", CivilTime{Year: 2025, Month: 0, Day: 1}, ErrInvalidCivilTime},
+		{"month overflow", CivilTime{Year: 2025, Month: 13, Day: 1}, ErrInvalidCivilTime},
+		{"day zero", CivilTime{Year: 2025, Month: 1, Day: 0}, ErrInvalidCivilTime},
+		{"invalid 30-day date", CivilTime{Year: 2025, Month: 4, Day: 31}, ErrInvalidCivilTime},
 		{"normalized hour", CivilTime{Year: 2025, Month: 1, Day: 1, Hour: 24}, ErrInvalidCivilTime},
+		{"negative minute", CivilTime{Year: 2025, Month: 1, Day: 1, Minute: -1}, ErrInvalidCivilTime},
+		{"minute overflow", CivilTime{Year: 2025, Month: 1, Day: 1, Minute: 60}, ErrInvalidCivilTime},
+		{"negative second", CivilTime{Year: 2025, Month: 1, Day: 1, Second: -1}, ErrInvalidCivilTime},
+		{"second overflow", CivilTime{Year: 2025, Month: 1, Day: 1, Second: 60}, ErrInvalidCivilTime},
+		{"negative nanosecond", CivilTime{Year: 2025, Month: 1, Day: 1, Nanosecond: -1}, ErrInvalidCivilTime},
+		{"nanosecond overflow", CivilTime{Year: 2025, Month: 1, Day: 1, Nanosecond: int(time.Second)}, ErrInvalidCivilTime},
 		{"gap", CivilTime{Year: 2025, Month: 3, Day: 9, Hour: 2, Minute: 30}, ErrNonexistentCivilTime},
 		{"fold", CivilTime{Year: 2025, Month: 11, Day: 2, Hour: 1, Minute: 30}, ErrAmbiguousCivilTime},
 	} {
