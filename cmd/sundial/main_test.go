@@ -20,8 +20,11 @@ func TestPhysicalConfigurationUsesSafeExactLength(t *testing.T) {
 	if stripLength != 144 {
 		t.Fatalf("strip length = %d", stripLength)
 	}
-	if previewSafety.MaxStripCurrent != 127_500 || previewSafety.BrightnessCeiling != 96 {
+	if previewSafety.MaxStripCurrent != 127_500 || previewSafety.BrightnessCeiling != rendererBrightnessCeiling {
 		t.Fatalf("physical safety = %+v", previewSafety)
+	}
+	if nativeDriverBrightness != 255 || rendererBrightnessCeiling != 96 {
+		t.Fatalf("brightness controls: native=%d renderer=%d", nativeDriverBrightness, rendererBrightnessCeiling)
 	}
 }
 
@@ -81,8 +84,8 @@ func TestVerificationSequenceIsCentrallyBounded(t *testing.T) {
 		for pixelIndex, pixel := range frame.Pixels() {
 			channels := []uint8{pixel.R, pixel.G, pixel.B, pixel.W}
 			for _, channel := range channels {
-				if channel > driverBrightness {
-					t.Fatalf("frame %d pixel %d channel = %d, ceiling %d", frameIndex, pixelIndex, channel, driverBrightness)
+				if channel > rendererBrightnessCeiling {
+					t.Fatalf("frame %d pixel %d channel = %d, ceiling %d", frameIndex, pixelIndex, channel, rendererBrightnessCeiling)
 				}
 				estimated += uint64(channel) * 20
 			}

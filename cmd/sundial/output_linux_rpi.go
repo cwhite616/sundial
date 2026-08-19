@@ -10,10 +10,10 @@ import (
 )
 
 const (
-	previewOutputDescription = "physical rpi-ws281x (GPIO18, SK6812 GRBW)"
+	previewOutputDescription = "physical rpi-ws281x (GPIO18, SK6812 GRBW, native brightness 255)"
 	physicalPreviewOutput    = true
 )
 
 func newPreviewOutput(ctx context.Context) (app.Output, error) {
-	return rpiws281x.New(ctx, stripLength, driverBrightness)
+	return rpiws281x.New(ctx, stripLength, nativeDriverBrightness)
 }
