@@ -73,7 +73,7 @@ func TestStartPreviewRetriesBeforeReportingDeliveredSuccess(t *testing.T) {
 	if len(writes) != 5 {
 		t.Fatalf("successful writes = %d", len(writes))
 	}
-	want := []render.Pixel{{R: 255}, {G: 255}, {B: 255}, {W: 255}, {W: 255}}
+	want := []render.Pixel{{R: 255}, {G: 255}, {B: 255}, {W: 255}, {W: 0x90, R: 0xA0, G: 0x35}}
 	for i, frame := range writes {
 		pixel, _ := frame.Pixel(stripLength / 2)
 		if pixel != want[i] {
@@ -184,7 +184,7 @@ func TestVerificationSequenceIsCentrallyBounded(t *testing.T) {
 			t.Fatalf("frame %d estimated current = %d, budget %d", frameIndex, estimated, previewSafety.MaxStripCurrent)
 		}
 	}
-	want := []render.Pixel{{R: 255}, {G: 255}, {B: 255}, {W: 255}, {W: 255}}
+	want := []render.Pixel{{R: 255}, {G: 255}, {B: 255}, {W: 255}, {W: 0x90, R: 0xA0, G: 0x35}}
 	for i, frame := range writes {
 		pixel, _ := frame.Pixel(stripLength / 2)
 		if pixel != want[i] {
@@ -192,11 +192,43 @@ func TestVerificationSequenceIsCentrallyBounded(t *testing.T) {
 		}
 	}
 	final := writes[len(writes)-1]
-	wantGlow := map[int]uint8{68: 32, 69: 64, 70: 128, 71: 255, 72: 255, 73: 255, 74: 128, 75: 64, 76: 32}
+	wantIntensity := map[int]uint8{68: 32, 69: 64, 70: 128, 71: 255, 72: 255, 73: 255, 74: 128, 75: 64, 76: 32}
 	for position, pixel := range final.Pixels() {
-		if pixel != (render.Pixel{W: wantGlow[position]}) {
-			t.Fatalf("final glow pixel %d = %+v, want W=%d", position, pixel, wantGlow[position])
+		intensity := wantIntensity[position]
+		want := render.Pixel{W: uint8(uint16(0x90) * uint16(intensity) / 255), R: uint8(uint16(0xA0) * uint16(intensity) / 255), G: uint8(uint16(0x35) * uint16(intensity) / 255)}
+		if pixel != want {
+			t.Fatalf("final glow pixel %d = %+v, want %+v", position, pixel, want)
 		}
+	}
+}
+
+func TestMappingSweepDeliversEveryOneBasedLightAndFailsDark(t *testing.T) {
+	output := &previewOutput{}
+	var lights []int
+	var holds int
+	err := runMappingSweep(context.Background(), output, previewSafety, nil, func(context.Context) error {
+		holds++
+		return nil
+	}, func(light int) {
+		lights = append(lights, light)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lights) != stripLength || holds != stripLength || lights[0] != 1 || lights[stripLength-1] != 144 {
+		t.Fatalf("mapping progress: lights=%v holds=%d", lights, holds)
+	}
+	output.mu.Lock()
+	writes, clears, closes := append([]render.Frame(nil), output.writes...), output.clears, output.closes
+	output.mu.Unlock()
+	if len(writes) != stripLength || clears != 1 || closes != 1 {
+		t.Fatalf("mapping lifecycle: writes=%d clears=%d closes=%d", len(writes), clears, closes)
+	}
+	first, _ := writes[0].Pixel(0)
+	last, _ := writes[stripLength-1].Pixel(stripLength - 1)
+	full := render.Pixel{W: 0x90, R: 0xA0, G: 0x35}
+	if first != full || last != full {
+		t.Fatalf("mapping boundaries: first=%+v last=%+v want=%+v", first, last, full)
 	}
 }
 
