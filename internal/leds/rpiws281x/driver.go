@@ -20,10 +20,11 @@ type backend interface {
 }
 
 type Driver struct {
-	mu      sync.Mutex
-	length  int
-	backend backend
-	closed  bool
+	mu       sync.Mutex
+	length   int
+	backend  backend
+	closed   bool
+	closeErr error
 }
 
 func newDriver(ctx context.Context, length int, makeBackend func() (backend, error)) (*Driver, error) {
@@ -48,6 +49,9 @@ func newDriver(ctx context.Context, length int, makeBackend func() (backend, err
 	}
 	if err := b.Render(make([]uint32, length)); err != nil {
 		return nil, errors.Join(fmt.Errorf("render initial dark rpi-ws281x frame: %w", err), clearAndRelease(b, length))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(fmt.Errorf("initialize rpi-ws281x LED driver after dark render: %w", err), clearAndRelease(b, length))
 	}
 	return &Driver{length: length, backend: b}, nil
 }
@@ -104,7 +108,7 @@ func (d *Driver) Close(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
-		return nil
+		return d.closeErr
 	}
 	d.closed = true
 	var errs []error
@@ -116,7 +120,8 @@ func (d *Driver) Close(ctx context.Context) error {
 	if err := d.backend.Release(); err != nil {
 		errs = append(errs, fmt.Errorf("release native rpi-ws281x backend: %w", err))
 	}
-	return errors.Join(errs...)
+	d.closeErr = errors.Join(errs...)
+	return d.closeErr
 }
 
 func releaseError(b backend) error {
