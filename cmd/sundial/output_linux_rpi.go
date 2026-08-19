@@ -1,4 +1,4 @@
-//go:build linux && arm && cgo
+//go:build linux && (arm || arm64) && cgo
 
 package main
 
@@ -7,6 +7,11 @@ import (
 
 	"github.com/cwhite616/sundial/internal/app"
 	"github.com/cwhite616/sundial/internal/leds/rpiws281x"
+)
+
+const (
+	previewOutputDescription = "physical rpi-ws281x (GPIO18, SK6812 GRBW)"
+	physicalPreviewOutput    = true
 )
 
 func newPreviewOutput(ctx context.Context) (app.Output, error) {

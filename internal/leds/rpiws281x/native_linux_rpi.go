@@ -1,4 +1,4 @@
-//go:build linux && arm && cgo
+//go:build linux && (arm || arm64) && cgo
 
 package rpiws281x
 
