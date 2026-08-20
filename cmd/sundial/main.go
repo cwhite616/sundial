@@ -6,16 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/signal"
 	"reflect"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/cwhite616/sundial/internal/app"
 	"github.com/cwhite616/sundial/internal/clock"
+	"github.com/cwhite616/sundial/internal/config"
 	"github.com/cwhite616/sundial/internal/render"
+	"github.com/cwhite616/sundial/internal/store"
 	"github.com/cwhite616/sundial/internal/timesync"
 )
 
@@ -329,39 +331,230 @@ func framesEqual(left, right render.Frame) bool {
 	return true
 }
 
-func run() error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	driver, err := newPreviewOutput(ctx)
-	if err != nil {
-		return fmt.Errorf("initialize preview output: %w", err)
+type lifecycleRecorder struct {
+	mu  sync.Mutex
+	out io.Writer
+	err io.Writer
+}
+
+func (r *lifecycleRecorder) RecordSynchronization(record app.SynchronizationDiagnostic) {
+	writer := r.out
+	if record.Error != "" {
+		writer = r.err
 	}
-	fmt.Printf("output mode: %s\n", previewOutputDescription)
-	err = runMappingSweep(ctx, driver, previewSafety, func(ctx context.Context, attempt int) error {
-		timer := time.NewTimer(time.Duration(attempt) * 25 * time.Millisecond)
-		defer timer.Stop()
+	if writer == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_ = json.NewEncoder(writer).Encode(struct {
+		Operation      string                            `json:"operation"`
+		Classification app.SynchronizationClassification `json:"classification"`
+		Observation    time.Time                         `json:"observation"`
+		Error          string                            `json:"error"`
+	}{record.Operation, record.Classification, record.Observation, record.Error})
+}
+
+func (r *lifecycleRecorder) record(writer io.Writer, operation, status string, err error) {
+	if writer == nil {
+		return
+	}
+	record := struct {
+		Operation string    `json:"operation"`
+		Status    string    `json:"status"`
+		Error     string    `json:"error,omitempty"`
+		Time      time.Time `json:"time"`
+	}{Operation: operation, Status: status, Time: time.Now().UTC()}
+	if err != nil {
+		record.Error = err.Error()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_ = json.NewEncoder(writer).Encode(record)
+}
+
+type serviceDependencies struct {
+	loadConfig      func(string) (config.Config, error)
+	openOutput      func(context.Context, config.Output) (app.Output, error)
+	clock           app.SystemClock
+	synchronization app.SynchronizationSource
+	out             io.Writer
+	err             io.Writer
+}
+
+func defaultServiceDependencies() serviceDependencies {
+	return serviceDependencies{loadConfig: config.Load, openOutput: newDeviceOutput, clock: newSystemClock(), synchronization: timesync.NewTimedatectl(), out: os.Stdout, err: os.Stderr}
+}
+
+func runService(ctx context.Context, configPath string, dependencies serviceDependencies) error {
+	recorder := &lifecycleRecorder{out: dependencies.out, err: dependencies.err}
+	cfg, err := dependencies.loadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("load startup configuration: %w", err)
+	}
+	stateStore, err := store.NewFile(cfg.StatePath, cfg.Output.StripLength)
+	if err != nil {
+		return fmt.Errorf("initialize device state store: %w", err)
+	}
+	state, err := stateStore.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("load durable device state: %w", err)
+	}
+	renderer, err := render.New(cfg.Output.StripLength, cfg.Safety)
+	if err != nil {
+		return fmt.Errorf("initialize service renderer: %w", err)
+	}
+	output, err := dependencies.openOutput(ctx, cfg.Output)
+	if err != nil {
+		return errors.Join(fmt.Errorf("initialize physical LED output: %w", err), cleanupOutput(output, cfg.Service.CleanupTimeout))
+	}
+	// The worker has an explicitly managed lifetime so root cancellation first
+	// stops the controller, preventing new submissions before output cleanup.
+	worker, err := app.NewWorker(context.Background(), output, app.WorkerOptions{MaxRetries: 2, CleanupTimeout: cfg.Service.CleanupTimeout, Backoff: func(ctx context.Context, attempt int) error {
+		t := time.NewTimer(time.Duration(attempt) * 25 * time.Millisecond)
+		defer t.Stop()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-timer.C:
+		case <-t.C:
 			return nil
 		}
-	}, holdMappingStep, func(light int) {
-		fmt.Printf("light %d\n", light)
-	})
+	}})
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
+		return errors.Join(fmt.Errorf("initialize output worker: %w", err), closeUnownedOutput(output))
+	}
+	runtime := app.RuntimeOptions{Clock: dependencies.clock, Renderer: renderer, Frames: worker, Sun: mappingSun(0), Synchronization: dependencies.synchronization, Diagnostics: recorder}
+	controller, err := app.NewRuntimeController(ctx, state, stateStore, runtime)
+	if err != nil {
+		return errors.Join(fmt.Errorf("initialize runtime controller: %w", err), worker.Close())
+	}
+
+	diagnosticsDone := make(chan struct{})
+	diagnosticsStarted := false
+	syncCtx, cancelSync := context.WithCancel(ctx)
+	syncRequests := make(chan struct{}, 1)
+	syncDone := make(chan struct{})
+	go func() {
+		defer close(syncDone)
+		for {
+			select {
+			case <-syncCtx.Done():
+				return
+			case <-syncRequests:
+				_ = controller.RefreshSynchronization(syncCtx)
+			}
 		}
+	}()
+	requestSynchronization := func() {
+		select {
+		case syncRequests <- struct{}{}:
+		default:
+		}
+	}
+	shutdown := func(cause error) error {
+		cancelSync()
+		controller.Close()
+		<-syncDone
+		cleanupErr := worker.Close()
+		if diagnosticsStarted {
+			<-diagnosticsDone
+		}
+		if cleanupErr != nil {
+			recorder.record(dependencies.err, "shutdown", "failed", cleanupErr)
+		} else {
+			recorder.record(dependencies.out, "shutdown", "stopped", nil)
+		}
+		if cause != nil && !errors.Is(cause, context.Canceled) {
+			return errors.Join(cause, cleanupErr)
+		}
+		return cleanupErr
+	}
+
+	if err := controller.Tick(ctx); err != nil {
+		return shutdown(fmt.Errorf("render initial auto tick: %w", err))
+	}
+	snapshot, err := controller.RuntimeSnapshot(ctx)
+	if err != nil {
+		return shutdown(fmt.Errorf("inspect initial auto tick: %w", err))
+	}
+	if err := waitForDelivery(ctx, worker, snapshot.Frame); err != nil {
+		return shutdown(fmt.Errorf("deliver initial auto tick: %w", err))
+	}
+	diagnosticsStarted = true
+	go func() {
+		defer close(diagnosticsDone)
+		for e := range worker.Errors() {
+			recorder.record(dependencies.err, "output_delivery", "degraded", e)
+		}
+	}()
+	recorder.record(dependencies.out, "startup", "ready", nil)
+	// Synchronization health is diagnostic-only and cannot gate readiness or ticks.
+	requestSynchronization()
+	ticks := time.NewTicker(cfg.Service.TickInterval)
+	defer ticks.Stop()
+	syncTicks := time.NewTicker(cfg.Service.SynchronizationInterval)
+	defer syncTicks.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return shutdown(ctx.Err())
+		case <-ticks.C:
+			if err := controller.Tick(ctx); err != nil && ctx.Err() == nil {
+				recorder.record(dependencies.err, "tick", "degraded", err)
+			}
+		case <-syncTicks.C:
+			requestSynchronization()
+		}
+	}
+}
+
+func cleanupOutput(output app.Output, timeout time.Duration) error {
+	if output == nil || (reflect.ValueOf(output).Kind() == reflect.Pointer && reflect.ValueOf(output).IsNil()) {
+		return nil
+	}
+	clearCtx, cancelClear := context.WithTimeout(context.Background(), timeout)
+	clearErr := output.Clear(clearCtx)
+	cancelClear()
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), timeout)
+	closeErr := output.Close(closeCtx)
+	cancelClose()
+	if clearErr != nil {
+		clearErr = fmt.Errorf("clear output after initialization failure: %w", clearErr)
+	}
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close output after initialization failure: %w", closeErr)
+	}
+	return errors.Join(clearErr, closeErr)
+}
+
+func configPathFromArgs(args []string) (string, error) {
+	if len(args) == 0 {
+		return "/etc/sundial/config.json", nil
+	}
+	if len(args) == 2 && args[0] == "--config" && args[1] != "" {
+		return args[1], nil
+	}
+	return "", errors.New("usage: sundial [--config PATH]")
+}
+
+func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	configPath, err := configPathFromArgs(os.Args[1:])
+	if err != nil {
 		return err
 	}
-	fmt.Printf("completed mapping sweep of %d lights; output is dark\n", stripLength)
-	return nil
+	return runService(ctx, configPath, defaultServiceDependencies())
 }
 
 func main() {
 	if err := run(); err != nil {
-		log.Printf("sundial preview failed: %v", err)
+		data, _ := json.Marshal(struct {
+			Operation string `json:"operation"`
+			Status    string `json:"status"`
+			Error     string `json:"error"`
+		}{"startup", "failed", err.Error()})
+		_, _ = os.Stderr.Write(append(data, '\n'))
 		os.Exit(1)
 	}
 }

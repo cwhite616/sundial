@@ -4,10 +4,19 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/cwhite616/sundial/internal/config"
 	"github.com/cwhite616/sundial/internal/leds/simulated"
 )
+
+func TestPortableServiceOutputCannotMasqueradeAsPhysical(t *testing.T) {
+	_, err := newDeviceOutput(context.Background(), config.Output{Driver: "rpi-ws281x", StripLength: 144, NativeBrightness: 255})
+	if err == nil || !strings.Contains(err.Error(), "unavailable in this build") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
 func TestPortableCompositionUsesExactLengthSimulator(t *testing.T) {
 	output, err := newPreviewOutput(context.Background())

@@ -1,0 +1,21 @@
+{
+  "state_path": "/var/lib/sundial/state.json",
+  "output": {
+    "driver": "rpi-ws281x",
+    "strip_length": 144,
+    "native_brightness": 255
+  },
+  "safety": {
+    "red_current": 20,
+    "green_current": 20,
+    "blue_current": 20,
+    "white_current": 20,
+    "max_strip_current": 127500,
+    "brightness_ceiling": 255
+  },
+  "service": {
+    "tick_interval": "1s",
+    "synchronization_interval": "5m",
+    "cleanup_timeout": "1s"
+  }
+}

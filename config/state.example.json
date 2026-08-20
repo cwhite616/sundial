@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "preferred_zone": "America/Detroit",
+  "calibration": [
+    { "hour": 0, "minute": 0, "second": 0, "nanosecond": 0, "pixel": 0 },
+    { "hour": 12, "minute": 0, "second": 0, "nanosecond": 0, "pixel": 72 }
+  ]
+}

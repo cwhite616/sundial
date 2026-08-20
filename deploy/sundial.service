@@ -1,0 +1,20 @@
+[Unit]
+Description=Sundial clock
+After=local-fs.target time-sync.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sundial --config /etc/sundial/config.json
+User=sundial
+Group=sundial
+StateDirectory=sundial
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=70s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

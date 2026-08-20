@@ -43,9 +43,50 @@ The control software is being written in Go. Development normally happens on mac
 
 The project is expected to separate timekeeping and calibration behavior from LED hardware access so that core logic can be developed and tested without the physical device attached.
 
-## Status
+## Native Raspberry Pi service
 
-Early development. The repository currently contains the Go module scaffold; hardware prototyping and initial clock behavior come next.
+Sundial runs as one native process; it does not need a login session or a
+container. A native build performed on the Raspberry Pi selects the physical
+`rpi-ws281x` adapter:
+
+```sh
+CGO_ENABLED=1 go build -o sundial ./cmd/sundial
+sudo groupadd --system sundial
+sudo useradd --system --gid sundial --home-dir /var/lib/sundial --shell /usr/sbin/nologin sundial
+sudo install -o root -g root -m 0755 sundial /usr/local/bin/sundial
+sudo install -d -o root -g root -m 0755 /etc/sundial
+sudo install -o root -g root -m 0644 config/sundial.example.json /etc/sundial/config.json
+sudo install -d -o sundial -g sundial -m 0750 /var/lib/sundial
+sudo install -o sundial -g sundial -m 0640 config/state.example.json /var/lib/sundial/state.json
+sudo install -o root -g root -m 0644 deploy/sundial.service /etc/systemd/system/sundial.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now sundial.service
+```
+
+For an ARMv6 cross-build, `GOOS=linux GOARCH=arm GOARM=6 CGO_ENABLED=1` is
+necessary but not sufficient: configure `CC` to an ARM Linux cross-compiler
+with the native ws281x library/toolchain available. A normal macOS compiler
+cannot produce this cgo-backed target binary.
+
+The configuration at `/etc/sundial/config.json` is read-only service input.
+The separately permissioned `/var/lib/sundial/state.json` is writable durable
+calibration and preferred-zone state (schema version 1). Install a valid state
+file before starting the unit. A non-ARM or non-cgo binary rejects physical
+startup explicitly; it never silently substitutes simulated output.
+
+Safety current values share one caller-selected integer unit. Derive each
+channel coefficient conservatively as that channel's measured worst-case
+full-scale current in the chosen unit divided by 255 (rounding up), and express
+`max_strip_current` in the same unit. `brightness_ceiling` is the separate
+global 1–255 scale ceiling. Account for power-supply, wiring, connector, and
+thermal limits when choosing the strip budget; do not copy the example values
+without validating the installed hardware.
+
+Use `sudo systemctl stop sundial` for graceful SIGTERM shutdown and
+`journalctl -u sundial.service -f` for newline-delimited JSON lifecycle,
+synchronization, and output diagnostics. After the process exits unsuccessfully,
+the unit waits ten seconds before restarting it and limits repeated startup failures to three per five
+minutes, preventing invalid input from creating an uncontrolled restart loop.
 
 ## Future ideas
 
@@ -57,4 +98,3 @@ After the core clock works, possible additions include:
 - Cloud-cover dimming and subtle lightning effects
 - Home Assistant integration
 - A finished presentation-quality mount with concealed electronics
-

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -12,8 +14,287 @@ import (
 
 	"github.com/cwhite616/sundial/internal/app"
 	"github.com/cwhite616/sundial/internal/clock"
+	"github.com/cwhite616/sundial/internal/config"
 	"github.com/cwhite616/sundial/internal/render"
 )
+
+type steppingClock struct {
+	mu   sync.Mutex
+	next time.Time
+}
+
+func (c *steppingClock) Sample() clock.Sample {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	value := c.next
+	c.next = c.next.Add(time.Hour)
+	return clock.Sample{Wall: value}
+}
+
+type syncFailure struct{}
+
+func (syncFailure) Observe(context.Context) (app.SynchronizationObservation, error) {
+	return app.SynchronizationObservation{}, errors.New("timedatectl unavailable")
+}
+
+type blockingSynchronization struct {
+	mu      sync.Mutex
+	calls   int
+	active  int
+	maximum int
+}
+
+func (s *blockingSynchronization) Observe(ctx context.Context) (app.SynchronizationObservation, error) {
+	s.mu.Lock()
+	s.calls++
+	s.active++
+	if s.active > s.maximum {
+		s.maximum = s.active
+	}
+	s.mu.Unlock()
+	<-ctx.Done()
+	s.mu.Lock()
+	s.active--
+	s.mu.Unlock()
+	return app.SynchronizationObservation{}, ctx.Err()
+}
+func (s *blockingSynchronization) snapshot() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls, s.maximum
+}
+
+type lifecycleOutput struct {
+	mu                       sync.Mutex
+	attempts, clears, closes int
+	failAfter                int
+	cleanupErr               error
+	events                   []string
+}
+
+func (o *lifecycleOutput) WriteFrame(context.Context, render.Frame) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.attempts++
+	o.events = append(o.events, "write")
+	if o.failAfter > 0 && o.attempts >= o.failAfter {
+		return errors.New("LED write failed")
+	}
+	return nil
+}
+func (o *lifecycleOutput) Clear(context.Context) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.clears++
+	o.events = append(o.events, "clear")
+	return o.cleanupErr
+}
+func (o *lifecycleOutput) Close(context.Context) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.closes++
+	o.events = append(o.events, "close")
+	return o.cleanupErr
+}
+func (o *lifecycleOutput) counts() (int, int, int, []string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.attempts, o.clears, o.closes, append([]string(nil), o.events...)
+}
+
+func serviceTestConfig(t *testing.T) config.Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "state.json")
+	document := `{"schema_version":1,"preferred_zone":"UTC","calibration":[{"hour":0,"minute":0,"second":0,"nanosecond":0,"pixel":0},{"hour":12,"minute":0,"second":0,"nanosecond":0,"pixel":12}]}`
+	if err := os.WriteFile(path, []byte(document), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return config.Config{StatePath: path, Output: config.Output{Driver: "rpi-ws281x", StripLength: 24, NativeBrightness: 255}, Safety: render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 100000, BrightnessCeiling: 255}, Service: config.Service{TickInterval: 10 * time.Millisecond, SynchronizationInterval: 20 * time.Millisecond, CleanupTimeout: time.Second}}
+}
+
+func TestRunServiceValidBootRendersImmediatelyTicksAndReportsReady(t *testing.T) {
+	cfg := serviceTestConfig(t)
+	output := &lifecycleOutput{}
+	var stdout, stderr bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	deps := serviceDependencies{loadConfig: func(string) (config.Config, error) { return cfg, nil }, openOutput: func(context.Context, config.Output) (app.Output, error) { return output, nil }, clock: &steppingClock{next: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)}, synchronization: syncFailure{}, out: &stdout, err: &stderr}
+	done := make(chan error, 1)
+	go func() { done <- runService(ctx, "ignored", deps) }()
+	deadline := time.After(time.Second)
+	for {
+		attempts, _, _, _ := output.counts()
+		if attempts >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("periodic tick not delivered")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var ready map[string]any
+	if err := json.Unmarshal(bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte("\n"))[0], &ready); err != nil {
+		t.Fatalf("ready is not NDJSON: %v: %s", err, stdout.String())
+	}
+	if ready["operation"] != "startup" || ready["status"] != "ready" {
+		t.Fatalf("ready record=%v", ready)
+	}
+}
+
+func TestRunServiceRejectsUnsafeStartupBeforeOutputAndCleansOwnedOutput(t *testing.T) {
+	var opened bool
+	deps := serviceDependencies{loadConfig: func(string) (config.Config, error) { return config.Config{}, errors.New("unsafe config") }, openOutput: func(context.Context, config.Output) (app.Output, error) {
+		opened = true
+		return &lifecycleOutput{}, nil
+	}}
+	if err := runService(context.Background(), "bad", deps); err == nil || opened {
+		t.Fatalf("err=%v opened=%v", err, opened)
+	}
+	cfg := serviceTestConfig(t)
+	owned := &lifecycleOutput{}
+	deps = serviceDependencies{loadConfig: func(string) (config.Config, error) { return cfg, nil }, openOutput: func(context.Context, config.Output) (app.Output, error) { return owned, nil }, clock: nil}
+	if err := runService(context.Background(), "bad-runtime", deps); err == nil {
+		t.Fatal("expected runtime startup error")
+	}
+	_, clears, closes, _ := owned.counts()
+	if clears != 1 || closes != 1 {
+		t.Fatalf("owned cleanup clear=%d close=%d", clears, closes)
+	}
+}
+
+func TestRunServiceDegradedSynchronizationAndOutputKeepTicking(t *testing.T) {
+	cfg := serviceTestConfig(t)
+	output := &lifecycleOutput{failAfter: 2}
+	var stderr bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Millisecond)
+	defer cancel()
+	deps := serviceDependencies{loadConfig: func(string) (config.Config, error) { return cfg, nil }, openOutput: func(context.Context, config.Output) (app.Output, error) { return output, nil }, clock: &steppingClock{next: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)}, synchronization: syncFailure{}, err: &stderr}
+	_ = runService(ctx, "ignored", deps)
+	attempts, _, _, _ := output.counts()
+	if attempts < 4 {
+		t.Fatalf("tick loop stopped after degraded output: attempts=%d", attempts)
+	}
+	if !strings.Contains(stderr.String(), `"operation":"refresh_synchronization"`) || !strings.Contains(stderr.String(), `"operation":"output_delivery"`) {
+		t.Fatalf("missing degraded NDJSON: %s", stderr.String())
+	}
+	for _, line := range bytes.Split(bytes.TrimSpace(stderr.Bytes()), []byte("\n")) {
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("invalid NDJSON %q: %v", line, err)
+		}
+	}
+}
+
+func TestRunServiceDoesNotOverlapSlowSynchronizationRefreshes(t *testing.T) {
+	cfg := serviceTestConfig(t)
+	output := &lifecycleOutput{}
+	source := &blockingSynchronization{}
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	deps := serviceDependencies{loadConfig: func(string) (config.Config, error) { return cfg, nil }, openOutput: func(context.Context, config.Output) (app.Output, error) { return output, nil }, clock: &steppingClock{next: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)}, synchronization: source}
+	_ = runService(ctx, "ignored", deps)
+	calls, maximum := source.snapshot()
+	if calls != 1 || maximum != 1 {
+		t.Fatalf("blocking synchronization calls=%d maximum concurrency=%d", calls, maximum)
+	}
+}
+
+func TestRunServiceCleansPartiallyConstructedOutputAndPreservesErrors(t *testing.T) {
+	cfg := serviceTestConfig(t)
+	initErr := errors.New("native init failed")
+	cleanupErr := errors.New("release failed")
+	output := &lifecycleOutput{cleanupErr: cleanupErr}
+	deps := serviceDependencies{loadConfig: func(string) (config.Config, error) { return cfg, nil }, openOutput: func(context.Context, config.Output) (app.Output, error) { return output, initErr }}
+	err := runService(context.Background(), "ignored", deps)
+	if !errors.Is(err, initErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("errors not preserved: %v", err)
+	}
+	_, clears, closes, events := output.counts()
+	if clears != 1 || closes != 1 || events[0] != "clear" || events[1] != "close" {
+		t.Fatalf("partial output cleanup: clear=%d close=%d events=%v", clears, closes, events)
+	}
+}
+
+func TestConfigPathFromArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    string
+		wantErr bool
+	}{{"default", nil, "/etc/sundial/config.json", false}, {"explicit", []string{"--config", "/tmp/test.json"}, "/tmp/test.json", false}, {"missing path", []string{"--config"}, "", true}, {"empty path", []string{"--config", ""}, "", true}, {"unknown", []string{"--verbose"}, "", true}, {"extra", []string{"--config", "a", "b"}, "", true}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := configPathFromArgs(tt.args)
+			if got != tt.want || (err != nil) != tt.wantErr {
+				t.Fatalf("got=(%q,%v), want=(%q,error=%v)", got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLifecycleSynchronizationDiagnosticsRouteSuccessAndFailureOnce(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	recorder := &lifecycleRecorder{out: &stdout, err: &stderr}
+	observed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	recorder.RecordSynchronization(app.SynchronizationDiagnostic{Operation: "refresh_synchronization", Classification: app.SynchronizationSynchronized, Observation: observed})
+	recorder.RecordSynchronization(app.SynchronizationDiagnostic{Operation: "refresh_synchronization", Classification: app.SynchronizationStale, Observation: observed, Error: "probe failed"})
+	if bytes.Count(stdout.Bytes(), []byte("\n")) != 1 || bytes.Count(stderr.Bytes(), []byte("\n")) != 1 {
+		t.Fatalf("routing stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	for _, line := range [][]byte{bytes.TrimSpace(stdout.Bytes()), bytes.TrimSpace(stderr.Bytes())} {
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("invalid NDJSON %q: %v", line, err)
+		}
+		if record["operation"] != "refresh_synchronization" {
+			t.Fatalf("record=%v", record)
+		}
+	}
+}
+
+func TestRunServiceCancellationClearsThenClosesOnceAndPreservesCleanupError(t *testing.T) {
+	cfg := serviceTestConfig(t)
+	cleanupErr := errors.New("cleanup failed")
+	output := &lifecycleOutput{cleanupErr: cleanupErr}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Cancellation before ownership is intentionally fail-dark and does not construct output.
+	opened := false
+	deps := serviceDependencies{loadConfig: func(string) (config.Config, error) { return cfg, nil }, openOutput: func(context.Context, config.Output) (app.Output, error) { opened = true; return output, nil }, clock: &steppingClock{next: time.Now()}, synchronization: syncFailure{}}
+	_ = runService(ctx, "ignored", deps)
+	if opened {
+		t.Fatal("output owned after pre-start cancellation")
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	var stdout, stderr bytes.Buffer
+	deps.out = &stdout
+	deps.err = &stderr
+	done := make(chan error, 1)
+	go func() { done <- runService(ctx, "ignored", deps) }()
+	for {
+		a, _, _, _ := output.counts()
+		if a > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	err := <-done
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("cleanup error not preserved: %v", err)
+	}
+	_, clears, closes, events := output.counts()
+	if clears != 1 || closes != 1 {
+		t.Fatalf("clear=%d close=%d", clears, closes)
+	}
+	if events[len(events)-2] != "clear" || events[len(events)-1] != "close" {
+		t.Fatalf("shutdown order=%v", events)
+	}
+}
 
 type previewOutput struct {
 	mu       sync.Mutex
