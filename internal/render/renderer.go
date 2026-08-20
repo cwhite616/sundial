@@ -13,6 +13,14 @@ type Renderer struct {
 	safety      Safety
 }
 
+// StripLength reports the immutable output length owned by the renderer.
+func (r *Renderer) StripLength() int {
+	if r == nil {
+		return 0
+	}
+	return r.stripLength
+}
+
 func New(stripLength int, safety Safety) (*Renderer, error) {
 	if stripLength <= 0 {
 		return nil, fmt.Errorf("initialize renderer: strip length must be positive: %d", stripLength)

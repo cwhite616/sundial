@@ -47,6 +47,22 @@ type tuningResult struct {
 
 type tuningDiagnostic func(tuningResult) error
 
+// systemClock is the composition-root implementation of the application's
+// System Clock port. Domain packages receive its samples and never read wall
+// time themselves.
+type systemClock struct{ origin time.Time }
+
+func newSystemClock() systemClock { return systemClock{origin: time.Now()} }
+
+func (c systemClock) Sample() clock.Sample {
+	now := time.Now()
+	return clock.Sample{Wall: now, Monotonic: now.Sub(c.origin)}
+}
+
+func runtimeControllerOptions(renderer *render.Renderer, frames app.FrameSubmitter, sun render.ArtificialSun) app.RuntimeOptions {
+	return app.RuntimeOptions{Clock: newSystemClock(), Renderer: renderer, Frames: frames, Sun: sun}
+}
+
 const mappingStepHold = time.Second
 
 // startTuningSequence evaluates a finite, caller-supplied set of attributable

@@ -35,6 +35,23 @@ func TestPhysicalConfigurationUsesSafeExactLength(t *testing.T) {
 	}
 }
 
+func TestRuntimeControllerOptionsWireSystemClockAndFrameDelivery(t *testing.T) {
+	renderer, err := render.New(1, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 1000, BrightnessCeiling: 255})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := app.NewWorker(context.Background(), &previewOutput{}, app.WorkerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+	options := runtimeControllerOptions(renderer, worker, render.ArtificialSun{Color: render.Pixel{W: 255}})
+	first, second := options.Clock.Sample(), options.Clock.Sample()
+	if options.Renderer != renderer || options.Frames != worker || second.Monotonic < first.Monotonic || first.Wall.IsZero() || second.Wall.IsZero() {
+		t.Fatalf("runtime options not wired: %+v", options)
+	}
+}
+
 func (o *previewOutput) WriteFrame(_ context.Context, frame render.Frame) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
