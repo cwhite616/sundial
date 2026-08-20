@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"time"
 )
 
@@ -39,16 +40,15 @@ type Sample struct {
 
 func NewAutoTimeline() Timeline { return Timeline{mode: TimelineAuto} }
 
-func NewAcceleratedTimeline(realAnchor, effectiveAnchor time.Time, rate float64) (Timeline, error) {
-	return NewAcceleratedTimelineFromSample(Sample{Wall: realAnchor}, effectiveAnchor, rate)
-}
-
 func NewAcceleratedTimelineFromSample(realAnchor Sample, effectiveAnchor time.Time, rate float64) (Timeline, error) {
 	if rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
 		return Timeline{}, fmt.Errorf("create accelerated timeline: %w: %v", ErrInvalidAccelerationRate, rate)
 	}
 	if realAnchor.Wall.IsZero() || effectiveAnchor.IsZero() {
 		return Timeline{}, fmt.Errorf("create accelerated timeline: %w: anchors must be absolute instants", ErrTimelineRange)
+	}
+	if realAnchor.Monotonic < 0 {
+		return Timeline{}, fmt.Errorf("create accelerated timeline: %w: monotonic anchor must not be negative", ErrTimelineRange)
 	}
 	return Timeline{mode: TimelineAccelerated, realAnchor: realAnchor.Wall, realReading: realAnchor.Monotonic, effectiveAnchor: effectiveAnchor, rate: rate}, nil
 }
@@ -64,8 +64,11 @@ func (t Timeline) Validate() error {
 		}
 		return nil
 	case TimelineAccelerated:
-		if t.rate <= 0 || math.IsNaN(t.rate) || math.IsInf(t.rate, 0) || t.realAnchor.IsZero() || t.effectiveAnchor.IsZero() {
+		if t.rate <= 0 || math.IsNaN(t.rate) || math.IsInf(t.rate, 0) {
 			return fmt.Errorf("validate accelerated timeline: %w", ErrInvalidAccelerationRate)
+		}
+		if t.realAnchor.IsZero() || t.effectiveAnchor.IsZero() || t.realReading < 0 {
+			return fmt.Errorf("validate accelerated timeline: %w", ErrTimelineRange)
 		}
 		return nil
 	default:
@@ -103,21 +106,39 @@ func (t Timeline) EffectiveTimeSample(sample Sample) (time.Time, error) {
 		if sample.Monotonic < t.realReading {
 			return time.Time{}, fmt.Errorf("evaluate accelerated timeline: %w: monotonic reading regressed", ErrTimelineRange)
 		}
-		if t.realReading < 0 && sample.Monotonic > time.Duration(math.MaxInt64)+t.realReading {
-			return time.Time{}, fmt.Errorf("evaluate accelerated timeline elapsed: %w", ErrTimelineRange)
-		}
 		elapsed := sample.Monotonic - t.realReading
 		if elapsed == time.Duration(math.MaxInt64) || elapsed == time.Duration(math.MinInt64) {
 			return time.Time{}, fmt.Errorf("evaluate accelerated timeline elapsed: %w", ErrTimelineRange)
 		}
-		scaled := float64(elapsed) * t.rate
-		if math.IsNaN(scaled) || math.IsInf(scaled, 0) || scaled >= float64(math.MaxInt64) || scaled <= float64(math.MinInt64) {
+		scaled, ok := scaleDuration(elapsed, t.rate)
+		if !ok {
 			return time.Time{}, fmt.Errorf("evaluate accelerated timeline: %w", ErrTimelineRange)
 		}
-		return t.effectiveAnchor.Add(time.Duration(scaled)), nil
+		result := t.effectiveAnchor.Add(scaled)
+		if result.Sub(t.effectiveAnchor) != scaled {
+			return time.Time{}, fmt.Errorf("evaluate accelerated timeline result: %w", ErrTimelineRange)
+		}
+		return result, nil
 	default:
 		return time.Time{}, fmt.Errorf("evaluate timeline: unknown mode %q", t.mode)
 	}
+}
+
+func scaleDuration(elapsed time.Duration, rate float64) (time.Duration, bool) {
+	rateValue := new(big.Rat)
+	if rateValue.SetFloat64(rate) == nil {
+		return 0, false
+	}
+	numerator := new(big.Int).Mul(big.NewInt(int64(elapsed)), rateValue.Num())
+	scaled := new(big.Int).Quo(numerator, rateValue.Denom())
+	if !scaled.IsInt64() {
+		return 0, false
+	}
+	value := scaled.Int64()
+	if value == math.MaxInt64 || value == math.MinInt64 {
+		return 0, false
+	}
+	return time.Duration(value), true
 }
 
 func (t Timeline) EvaluateSample(sample Sample, calibration Calibration, location *time.Location) (time.Time, int, error) {

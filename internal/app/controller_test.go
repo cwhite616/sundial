@@ -140,6 +140,14 @@ func TestRuntimeControllerOwnsSunTemplateAndRejectsTypedNilDependencies(t *testi
 	}
 }
 
+func TestRuntimeControllerRejectsRendererCalibrationLengthMismatch(t *testing.T) {
+	state := mustState(t, 0, "UTC", 0, 9)
+	renderer, _ := render.New(9, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10000, BrightnessCeiling: 255})
+	if _, err := NewRuntimeController(context.Background(), state, immediateStore{}, RuntimeOptions{Clock: &testSystemClock{}, Renderer: renderer, Frames: &frameCollector{}}); err == nil {
+		t.Fatal("mismatched renderer and calibration lengths were accepted")
+	}
+}
+
 func TestLegacyControllerRuntimeOperationsAreUnavailable(t *testing.T) {
 	c, err := NewController(context.Background(), mustState(t, 0, "UTC", 0, 9), immediateStore{})
 	if err != nil {
@@ -151,6 +159,9 @@ func TestLegacyControllerRuntimeOperationsAreUnavailable(t *testing.T) {
 	}
 	if _, err := c.RuntimeSnapshot(context.Background()); !errors.Is(err, ErrRuntimeUnavailable) {
 		t.Fatalf("snapshot error = %v", err)
+	}
+	if err := c.Tick(context.Background()); !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("tick error = %v", err)
 	}
 }
 
@@ -265,6 +276,23 @@ func TestDurableAdoptionClearsRuntimeFieldsFromOldCalibration(t *testing.T) {
 	}
 	if snapshot.Device.PreferredZone() != "America/Detroit" || !snapshot.Effective.IsZero() || snapshot.Position != -1 || snapshot.Frame.Len() != 0 {
 		t.Fatalf("runtime after durable adoption = %+v", snapshot)
+	}
+}
+
+func TestRuntimeControllerRejectsDurableStripLengthChange(t *testing.T) {
+	state := mustState(t, 0, "UTC", 0, 9)
+	renderer, _ := render.New(10, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10000, BrightnessCeiling: 255})
+	c, err := NewRuntimeController(context.Background(), state, immediateStore{}, RuntimeOptions{Clock: &testSystemClock{}, Renderer: renderer, Frames: &frameCollector{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.Replace(context.Background(), Replacement{PreferredZone: "UTC", StripLength: 11, Points: testPoints(t, 0, 10)}); err == nil {
+		t.Fatal("runtime controller accepted a strip-length-changing replacement")
+	}
+	snapshot, err := c.Snapshot(context.Background())
+	if err != nil || snapshot.Calibration().StripLength() != 10 || snapshot.Revision() != 0 {
+		t.Fatalf("state changed after rejected replacement: %+v, %v", snapshot, err)
 	}
 }
 

@@ -31,7 +31,7 @@ func TestAcceleratedTimelineUsesMonotonicElapsedAndRejectsInvalidRates(t *testin
 		t.Fatalf("effective = %v, %v", got, err)
 	}
 	for _, rate := range []float64{0, -1, math.NaN(), math.Inf(1), math.Inf(-1)} {
-		if _, err := NewAcceleratedTimeline(realAnchor, effectiveAnchor, rate); !errors.Is(err, ErrInvalidAccelerationRate) {
+		if _, err := NewAcceleratedTimelineFromSample(Sample{Wall: realAnchor}, effectiveAnchor, rate); !errors.Is(err, ErrInvalidAccelerationRate) {
 			t.Fatalf("rate %v error = %v", rate, err)
 		}
 	}
@@ -39,7 +39,7 @@ func TestAcceleratedTimelineUsesMonotonicElapsedAndRejectsInvalidRates(t *testin
 
 func TestAcceleratedTimelineRejectsDurationOverflow(t *testing.T) {
 	anchor := time.Date(2026, 8, 19, 1, 0, 0, 0, time.UTC)
-	timeline, err := NewAcceleratedTimeline(anchor, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), math.MaxFloat64)
+	timeline, err := NewAcceleratedTimelineFromSample(Sample{Wall: anchor}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), math.MaxFloat64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,13 +63,6 @@ func TestTimelineRejectsZeroAndRegressingSamplesAndSubtractionOverflow(t *testin
 	if _, err := timeline.EffectiveTimeSample(Sample{Wall: anchor, Monotonic: 4}); !errors.Is(err, ErrTimelineRange) {
 		t.Fatalf("regression error = %v", err)
 	}
-	timeline, err = NewAcceleratedTimelineFromSample(Sample{Wall: anchor, Monotonic: time.Duration(math.MinInt64)}, anchor, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := timeline.EffectiveTimeSample(Sample{Wall: anchor, Monotonic: time.Duration(math.MaxInt64)}); !errors.Is(err, ErrTimelineRange) {
-		t.Fatalf("subtraction overflow error = %v", err)
-	}
 }
 
 func TestAcceleratedCompatibilityEvaluationDoesNotSubtractReadingTwice(t *testing.T) {
@@ -86,12 +79,43 @@ func TestAcceleratedCompatibilityEvaluationDoesNotSubtractReadingTwice(t *testin
 
 func TestAcceleratedRejectsFloatBoundaryThatWouldWrapDuration(t *testing.T) {
 	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	timeline, err := NewAcceleratedTimeline(anchor, anchor, float64(math.MaxInt64))
+	timeline, err := NewAcceleratedTimelineFromSample(Sample{Wall: anchor}, anchor, float64(math.MaxInt64))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := timeline.EffectiveTimeSample(Sample{Wall: anchor, Monotonic: 1}); !errors.Is(err, ErrTimelineRange) {
 		t.Fatalf("boundary error = %v", err)
+	}
+}
+
+func TestAcceleratedTimelineRejectsNegativeMonotonicAnchor(t *testing.T) {
+	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := NewAcceleratedTimelineFromSample(Sample{Wall: anchor, Monotonic: -1}, anchor, 1); !errors.Is(err, ErrTimelineRange) {
+		t.Fatalf("negative monotonic anchor error = %v", err)
+	}
+	invalid := Timeline{mode: TimelineAccelerated, realAnchor: anchor, effectiveAnchor: anchor, rate: 1, realReading: -1}
+	if err := invalid.Validate(); !errors.Is(err, ErrTimelineRange) {
+		t.Fatalf("negative monotonic validation error = %v", err)
+	}
+}
+
+func TestAcceleratedTimelineClassifiesInvalidAnchorsAsRangeErrors(t *testing.T) {
+	invalid := Timeline{mode: TimelineAccelerated, rate: 1}
+	if err := invalid.Validate(); !errors.Is(err, ErrTimelineRange) || errors.Is(err, ErrInvalidAccelerationRate) {
+		t.Fatalf("invalid anchor validation error = %v", err)
+	}
+}
+
+func TestAcceleratedTimelinePreservesNanosecondsBeyondFloatPrecision(t *testing.T) {
+	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	elapsed := time.Duration(1<<53 + 1)
+	timeline, err := NewAcceleratedTimelineFromSample(Sample{Wall: anchor}, anchor, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := timeline.EffectiveTimeSample(Sample{Monotonic: elapsed})
+	if err != nil || !got.Equal(anchor.Add(elapsed)) {
+		t.Fatalf("effective = %v, %v; want %v", got, err, anchor.Add(elapsed))
 	}
 }
 

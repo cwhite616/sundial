@@ -98,6 +98,9 @@ func NewRuntimeController(parent context.Context, initial DeviceState, store Dev
 	if isNilInterface(runtime.Clock) || runtime.Renderer == nil || isNilInterface(runtime.Frames) {
 		return nil, fmt.Errorf("initialize runtime controller: %w", ErrRuntimeUnavailable)
 	}
+	if got, want := runtime.Renderer.StripLength(), initial.Calibration().StripLength(); got != want {
+		return nil, fmt.Errorf("initialize runtime controller: renderer strip length %d does not match calibration strip length %d", got, want)
+	}
 	runtime.Sun.IntensityProfile = append([]uint8(nil), runtime.Sun.IntensityProfile...)
 	c, err := newController(parent, initial, store)
 	if err != nil {
@@ -191,8 +194,6 @@ func (c *Controller) ReplaceTimeline(ctx context.Context, timeline clock.Timelin
 	case c.timeline <- request:
 	}
 	select {
-	case <-ctx.Done():
-		return fmt.Errorf("wait for timeline replacement: %w", ctx.Err())
 	case <-c.done:
 		return ErrControllerClosed
 	case err := <-request.result:
@@ -213,8 +214,6 @@ func (c *Controller) Tick(ctx context.Context) error {
 	case c.tick <- request:
 	}
 	select {
-	case <-ctx.Done():
-		return fmt.Errorf("wait for timeline tick: %w", ctx.Err())
 	case <-c.done:
 		return ErrControllerClosed
 	case err := <-request.result:
@@ -289,6 +288,10 @@ func (c *Controller) run(adopted DeviceState, store DeviceStateStore, runtime Ru
 			candidate, err := NewDeviceState(revision, request.replacement)
 			if err != nil {
 				request.result <- fmt.Errorf("replace device state: %w", err)
+				continue
+			}
+			if c.runtimeEnabled && candidate.Calibration().StripLength() != runtime.Renderer.StripLength() {
+				request.result <- fmt.Errorf("replace device state: calibration strip length %d does not match runtime renderer strip length %d", candidate.Calibration().StripLength(), runtime.Renderer.StripLength())
 				continue
 			}
 			inFlight = &pendingReplacement{request: request, candidate: candidate}

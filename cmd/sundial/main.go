@@ -55,7 +55,8 @@ type systemClock struct{ origin time.Time }
 func newSystemClock() systemClock { return systemClock{origin: time.Now()} }
 
 func (c systemClock) Sample() clock.Sample {
-	return clock.Sample{Wall: time.Now(), Monotonic: time.Since(c.origin)}
+	now := time.Now()
+	return clock.Sample{Wall: now, Monotonic: now.Sub(c.origin)}
 }
 
 func runtimeControllerOptions(renderer *render.Renderer, frames app.FrameSubmitter, sun render.ArtificialSun) app.RuntimeOptions {
