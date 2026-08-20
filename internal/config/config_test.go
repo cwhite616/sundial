@@ -2,7 +2,10 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +23,7 @@ func TestDecodeValidConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Output.StripLength != 144 || c.Service.TickInterval != time.Second || c.Service.SynchronizationInterval != 5*time.Minute || c.Service.CleanupTimeout != time.Second || c.Safety.BrightnessCeiling != 200 {
+	if c.Output != (Output{Driver: "rpi-ws281x", StripLength: 144, NativeBrightness: 255}) || c.Service.TickInterval != time.Second || c.Service.SynchronizationInterval != 5*time.Minute || c.Service.CleanupTimeout != time.Second || c.Safety.BrightnessCeiling != 200 {
 		t.Fatalf("unexpected config: %+v", c)
 	}
 }
@@ -35,6 +38,7 @@ func TestDecodeRejectsUnsafeAndNonStrictConfiguration(t *testing.T) {
 		{"relative state path", `"/var/lib/sundial/state.json"`, `"state.json"`},
 		{"invalid driver", `"rpi-ws281x"`, `"simulated"`},
 		{"nonpositive strip", `"strip_length":144`, `"strip_length":0`},
+		{"strip above maximum", `"strip_length":144`, `"strip_length":513`},
 		{"missing output field", `,"native_brightness":255`, ``},
 		{"missing service field", `,"cleanup_timeout":"1s"`, ``},
 		{"tick too short", `"tick_interval":"1s"`, `"tick_interval":"1ms"`},
@@ -50,6 +54,37 @@ func TestDecodeRejectsUnsafeAndNonStrictConfiguration(t *testing.T) {
 				t.Fatal("expected rejection")
 			}
 		})
+	}
+}
+
+func TestDecodeAcceptsConfiguredBoundaries(t *testing.T) {
+	document := strings.NewReplacer(
+		`"strip_length":144`, `"strip_length":512`,
+		`"native_brightness":255`, `"native_brightness":1`,
+		`"brightness_ceiling":200`, `"brightness_ceiling":255`,
+		`"tick_interval":"1s"`, `"tick_interval":"10ms"`,
+		`"synchronization_interval":"5m"`, `"synchronization_interval":"24h"`,
+		`"cleanup_timeout":"1s"`, `"cleanup_timeout":"30s"`,
+	).Replace(valid)
+	if _, err := Decode(strings.NewReader(document)); err != nil {
+		t.Fatalf("accepted boundaries rejected: %v", err)
+	}
+}
+
+func TestLoadReadsFileAndPreservesPathErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(valid), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Output.NativeBrightness != 255 || got.StatePath != "/var/lib/sundial/state.json" {
+		t.Fatalf("loaded config = %+v", got)
+	}
+	if _, err := Load(filepath.Join(t.TempDir(), "missing.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file error = %v", err)
 	}
 }
 

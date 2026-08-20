@@ -51,17 +51,22 @@ container. A native build performed on the Raspberry Pi selects the physical
 
 ```sh
 CGO_ENABLED=1 go build -o sundial ./cmd/sundial
-sudo groupadd --system sundial
-sudo useradd --system --gid sundial --home-dir /var/lib/sundial --shell /usr/sbin/nologin sundial
+CGO_ENABLED=1 go list -f '{{.GoFiles}}' ./cmd/sundial
 sudo install -o root -g root -m 0755 sundial /usr/local/bin/sundial
 sudo install -d -o root -g root -m 0755 /etc/sundial
 sudo install -o root -g root -m 0644 config/sundial.example.json /etc/sundial/config.json
-sudo install -d -o sundial -g sundial -m 0750 /var/lib/sundial
-sudo install -o sundial -g sundial -m 0640 config/state.example.json /var/lib/sundial/state.json
+sudo install -d -o root -g root -m 0750 /var/lib/sundial
+sudo install -o root -g root -m 0640 config/state.example.json /var/lib/sundial/state.json
 sudo install -o root -g root -m 0644 deploy/sundial.service /etc/systemd/system/sundial.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now sundial.service
 ```
+
+The `go list` output must contain `output_linux_rpi.go`. If it reports
+`output_portable.go`, stop: that build would reject physical service startup.
+The GPIO18 PWM/DMA backend opens privileged memory interfaces, so the unit runs
+as root as required by the upstream rpi-ws281x execution model. Keep the binary,
+configuration, and state root-owned as shown above.
 
 For an ARMv6 cross-build, `GOOS=linux GOARCH=arm GOARM=6 CGO_ENABLED=1` is
 necessary but not sufficient: configure `CC` to an ARM Linux cross-compiler
@@ -87,6 +92,10 @@ Use `sudo systemctl stop sundial` for graceful SIGTERM shutdown and
 synchronization, and output diagnostics. After the process exits unsuccessfully,
 the unit waits ten seconds before restarting it and limits repeated startup failures to three per five
 minutes, preventing invalid input from creating an uncontrolled restart loop.
+The native cgo render call cannot be interrupted if the backend itself hangs;
+in that exceptional case `TimeoutStopSec` bounds shutdown and systemd kills the
+process, so fail-dark cleanup cannot be guaranteed. Physical fault testing must
+record this limitation.
 
 ## Future ideas
 

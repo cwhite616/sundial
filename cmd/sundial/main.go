@@ -78,7 +78,7 @@ func (r synchronizationDiagnosticRecorder) RecordSynchronization(record app.Sync
 		Operation      string                            `json:"operation"`
 		Classification app.SynchronizationClassification `json:"classification"`
 		Observation    time.Time                         `json:"observation"`
-		Error          string                            `json:"error"`
+		Error          string                            `json:"error,omitempty"`
 	}{record.Operation, record.Classification, record.Observation, record.Error})
 }
 
@@ -351,7 +351,7 @@ func (r *lifecycleRecorder) RecordSynchronization(record app.SynchronizationDiag
 		Operation      string                            `json:"operation"`
 		Classification app.SynchronizationClassification `json:"classification"`
 		Observation    time.Time                         `json:"observation"`
-		Error          string                            `json:"error"`
+		Error          string                            `json:"error,omitempty"`
 	}{record.Operation, record.Classification, record.Observation, record.Error})
 }
 
@@ -403,6 +403,11 @@ func runService(ctx context.Context, configPath string, dependencies serviceDepe
 	renderer, err := render.New(cfg.Output.StripLength, cfg.Safety)
 	if err != nil {
 		return fmt.Errorf("initialize service renderer: %w", err)
+	}
+	// Prove the actual service scene can be evaluated safely before taking
+	// ownership of physical output. A centered sun exercises the full profile.
+	if _, err := renderer.Render(mappingSun(cfg.Output.StripLength / 2)); err != nil {
+		return fmt.Errorf("validate service scene safety: %w", err)
 	}
 	output, err := dependencies.openOutput(ctx, cfg.Output)
 	if err != nil {
@@ -459,12 +464,13 @@ func runService(ctx context.Context, configPath string, dependencies serviceDepe
 		if diagnosticsStarted {
 			<-diagnosticsDone
 		}
-		if cleanupErr != nil {
-			recorder.record(dependencies.err, "shutdown", "failed", cleanupErr)
+		fatalCause := cause != nil && !errors.Is(cause, context.Canceled)
+		if cleanupErr != nil || fatalCause {
+			recorder.record(dependencies.err, "shutdown", "failed", errors.Join(cause, cleanupErr))
 		} else {
 			recorder.record(dependencies.out, "shutdown", "stopped", nil)
 		}
-		if cause != nil && !errors.Is(cause, context.Canceled) {
+		if fatalCause {
 			return errors.Join(cause, cleanupErr)
 		}
 		return cleanupErr

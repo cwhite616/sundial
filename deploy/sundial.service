@@ -7,8 +7,6 @@ StartLimitBurst=3
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/sundial --config /etc/sundial/config.json
-User=sundial
-Group=sundial
 StateDirectory=sundial
 Restart=on-failure
 RestartSec=10s

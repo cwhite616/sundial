@@ -21,6 +21,7 @@ const (
 	maxSyncInterval = 24 * time.Hour
 	maxCleanup      = 30 * time.Second
 	maxDocumentSize = 64 * 1024
+	maxStripLength  = 512
 )
 
 type Output struct {
@@ -105,8 +106,8 @@ func Decode(r io.Reader) (Config, error) {
 	if d.Output.Driver != "rpi-ws281x" {
 		return Config{}, fmt.Errorf("output.driver must be %q", "rpi-ws281x")
 	}
-	if d.Output.StripLength <= 0 {
-		return Config{}, errors.New("output.strip_length must be positive")
+	if d.Output.StripLength <= 0 || d.Output.StripLength > maxStripLength {
+		return Config{}, fmt.Errorf("output.strip_length must be in [1,%d]", maxStripLength)
 	}
 	if d.Output.NativeBrightness < 1 || d.Output.NativeBrightness > 255 {
 		return Config{}, errors.New("output.native_brightness must be in [1,255]")

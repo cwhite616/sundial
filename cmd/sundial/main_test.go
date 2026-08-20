@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -117,7 +119,11 @@ func TestRunServiceValidBootRendersImmediatelyTicksAndReportsReady(t *testing.T)
 	output := &lifecycleOutput{}
 	var stdout, stderr bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
-	deps := serviceDependencies{loadConfig: func(string) (config.Config, error) { return cfg, nil }, openOutput: func(context.Context, config.Output) (app.Output, error) { return output, nil }, clock: &steppingClock{next: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)}, synchronization: syncFailure{}, out: &stdout, err: &stderr}
+	var openedWith config.Output
+	deps := serviceDependencies{loadConfig: func(string) (config.Config, error) { return cfg, nil }, openOutput: func(_ context.Context, settings config.Output) (app.Output, error) {
+		openedWith = settings
+		return output, nil
+	}, clock: &steppingClock{next: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)}, synchronization: syncFailure{}, out: &stdout, err: &stderr}
 	done := make(chan error, 1)
 	go func() { done <- runService(ctx, "ignored", deps) }()
 	deadline := time.After(time.Second)
@@ -143,6 +149,9 @@ func TestRunServiceValidBootRendersImmediatelyTicksAndReportsReady(t *testing.T)
 	if ready["operation"] != "startup" || ready["status"] != "ready" {
 		t.Fatalf("ready record=%v", ready)
 	}
+	if openedWith != cfg.Output || openedWith.NativeBrightness != 255 {
+		t.Fatalf("output settings = %+v, want %+v", openedWith, cfg.Output)
+	}
 }
 
 func TestRunServiceRejectsUnsafeStartupBeforeOutputAndCleansOwnedOutput(t *testing.T) {
@@ -163,6 +172,20 @@ func TestRunServiceRejectsUnsafeStartupBeforeOutputAndCleansOwnedOutput(t *testi
 	_, clears, closes, _ := owned.counts()
 	if clears != 1 || closes != 1 {
 		t.Fatalf("owned cleanup clear=%d close=%d", clears, closes)
+	}
+}
+
+func TestRunServiceRejectsOverflowingSafetyBeforeOutputOwnership(t *testing.T) {
+	cfg := serviceTestConfig(t)
+	cfg.Safety.WhiteCurrent = math.MaxUint64
+	opened := false
+	deps := serviceDependencies{loadConfig: func(string) (config.Config, error) { return cfg, nil }, openOutput: func(context.Context, config.Output) (app.Output, error) {
+		opened = true
+		return &lifecycleOutput{}, nil
+	}}
+	err := runService(context.Background(), "ignored", deps)
+	if !errors.Is(err, render.ErrInvalidSafety) || opened {
+		t.Fatalf("unsafe scene error=%v opened=%v", err, opened)
 	}
 }
 
@@ -253,6 +276,68 @@ func TestLifecycleSynchronizationDiagnosticsRouteSuccessAndFailureOnce(t *testin
 		if record["operation"] != "refresh_synchronization" {
 			t.Fatalf("record=%v", record)
 		}
+	}
+	var success map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &success); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := success["error"]; present {
+		t.Fatalf("successful diagnostic contains empty error: %v", success)
+	}
+}
+
+func TestRunServiceFatalDeliveryReportsFailedShutdown(t *testing.T) {
+	cfg := serviceTestConfig(t)
+	output := &lifecycleOutput{failAfter: 1}
+	var stdout, stderr bytes.Buffer
+	deps := serviceDependencies{loadConfig: func(string) (config.Config, error) { return cfg, nil }, openOutput: func(context.Context, config.Output) (app.Output, error) { return output, nil }, clock: &steppingClock{next: time.Now()}, synchronization: syncFailure{}, out: &stdout, err: &stderr}
+	err := runService(context.Background(), "ignored", deps)
+	if err == nil || !strings.Contains(stderr.String(), `"operation":"shutdown","status":"failed"`) {
+		t.Fatalf("fatal delivery error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), `"operation":"shutdown","status":"stopped"`) {
+		t.Fatalf("fatal shutdown reported stopped: %s", stdout.String())
+	}
+}
+
+func TestMainFatalStartupWritesOneNDJSONRecordAndExitsOne(t *testing.T) {
+	if os.Getenv("SUNDIAL_TEST_FATAL_MAIN") == "1" {
+		os.Args = []string{"sundial", "--invalid"}
+		main()
+		return
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestMainFatalStartupWritesOneNDJSONRecordAndExitsOne$")
+	command.Env = append(os.Environ(), "SUNDIAL_TEST_FATAL_MAIN=1")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	err := command.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("fatal main error=%v stderr=%q", err, stderr.String())
+	}
+	lines := bytes.Split(bytes.TrimSpace(stderr.Bytes()), []byte("\n"))
+	if len(lines) != 1 {
+		t.Fatalf("fatal stderr records=%d: %q", len(lines), stderr.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal(lines[0], &record); err != nil || record["operation"] != "startup" || record["status"] != "failed" {
+		t.Fatalf("fatal record=%v parseErr=%v", record, err)
+	}
+}
+
+func TestSystemdUnitRunsPrivilegedPWMBackendWithBoundedFallback(t *testing.T) {
+	unit, err := os.ReadFile("../../deploy/sundial.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(unit)
+	for _, required := range []string{"ExecStart=/usr/local/bin/sundial --config /etc/sundial/config.json", "TimeoutStopSec=70s", "Restart=on-failure"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("unit missing %q: %s", required, text)
+		}
+	}
+	if strings.Contains(text, "User=") || strings.Contains(text, "Group=") {
+		t.Fatalf("PWM/DMA unit unexpectedly drops root privileges: %s", text)
 	}
 }
 
