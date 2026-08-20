@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -47,9 +49,46 @@ func TestRuntimeControllerOptionsWireSystemClockAndFrameDelivery(t *testing.T) {
 	defer worker.Close()
 	options := runtimeControllerOptions(renderer, worker, render.ArtificialSun{Color: render.Pixel{W: 255}})
 	first, second := options.Clock.Sample(), options.Clock.Sample()
-	if options.Renderer != renderer || options.Frames != worker || second.Monotonic < first.Monotonic || first.Wall.IsZero() || second.Wall.IsZero() {
+	if options.Renderer != renderer || options.Frames != worker || options.Synchronization == nil || options.Diagnostics == nil || second.Monotonic < first.Monotonic || first.Wall.IsZero() || second.Wall.IsZero() {
 		t.Fatalf("runtime options not wired: %+v", options)
 	}
+}
+
+func TestSynchronizationDiagnosticHasStableStructuredFields(t *testing.T) {
+	var output bytes.Buffer
+	recorder := synchronizationDiagnosticRecorder{writer: &output}
+	recorder.RecordSynchronization(app.SynchronizationDiagnostic{
+		Operation: "refresh_synchronization", Classification: app.SynchronizationStale,
+		Observation: time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC), Error: "timedatectl failed",
+	})
+	var record map[string]any
+	if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"operation", "classification", "observation", "error"} {
+		if _, ok := record[field]; !ok {
+			t.Fatalf("diagnostic missing %q: %s", field, output.String())
+		}
+	}
+	if got := record["operation"]; got != "refresh_synchronization" {
+		t.Fatalf("operation = %v", got)
+	}
+	if got := record["classification"]; got != "stale" {
+		t.Fatalf("classification = %v", got)
+	}
+	if got := record["observation"]; got != "2026-08-20T12:00:00Z" {
+		t.Fatalf("observation = %v", got)
+	}
+	if got := record["error"]; got != "timedatectl failed" {
+		t.Fatalf("error = %v", got)
+	}
+	if !strings.HasSuffix(output.String(), "\n") || strings.Count(output.String(), "\n") != 1 {
+		t.Fatalf("diagnostic is not one newline-delimited record: %q", output.String())
+	}
+}
+
+func TestSynchronizationDiagnosticNilWriterIsSafe(t *testing.T) {
+	synchronizationDiagnosticRecorder{}.RecordSynchronization(app.SynchronizationDiagnostic{})
 }
 
 func (o *previewOutput) WriteFrame(_ context.Context, frame render.Frame) error {

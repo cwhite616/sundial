@@ -44,6 +44,417 @@ type nilClock struct{}
 
 func (*nilClock) Sample() clock.Sample { return clock.Sample{} }
 
+type synchronizationSourceFunc func(context.Context) (SynchronizationObservation, error)
+
+func (f synchronizationSourceFunc) Observe(ctx context.Context) (SynchronizationObservation, error) {
+	return f(ctx)
+}
+
+type synchronizationDiagnostics struct {
+	mu      sync.Mutex
+	records []SynchronizationDiagnostic
+}
+
+func (d *synchronizationDiagnostics) RecordSynchronization(record SynchronizationDiagnostic) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.records = append(d.records, record)
+}
+
+func TestSynchronizationRefreshTransitionsAndTicksContinue(t *testing.T) {
+	observedAt := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	failure := errors.New("status unavailable")
+	var mu sync.Mutex
+	results := []struct {
+		observation SynchronizationObservation
+		err         error
+	}{
+		{err: failure},
+		{observation: SynchronizationObservation{Classification: SynchronizationSynchronized, ObservedAt: observedAt}},
+		{err: failure},
+		{observation: SynchronizationObservation{Classification: SynchronizationUnsynchronized, ObservedAt: observedAt.Add(time.Minute)}},
+	}
+	source := synchronizationSourceFunc(func(context.Context) (SynchronizationObservation, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		result := results[0]
+		results = results[1:]
+		return result.observation, result.err
+	})
+	state := mustState(t, 0, "UTC", 0, 9)
+	renderer, _ := render.New(10, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10000, BrightnessCeiling: 255})
+	frames := &frameCollector{}
+	diagnostics := &synchronizationDiagnostics{}
+	c, err := NewRuntimeController(context.Background(), state, immediateStore{}, RuntimeOptions{
+		Clock: &testSystemClock{samples: []clock.Sample{
+			{Wall: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)},
+			{Wall: time.Date(2026, 8, 20, 18, 0, 0, 0, time.UTC)},
+		}}, Renderer: renderer, Frames: frames, Synchronization: source, Diagnostics: diagnostics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	initial, _ := c.RuntimeSnapshot(context.Background())
+	if initial.Synchronization.Classification != SynchronizationUnknown || initial.Synchronization.LastKnown != nil {
+		t.Fatalf("initial health = %+v", initial.Synchronization)
+	}
+	if err := c.RefreshSynchronization(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("first failure = %v", err)
+	}
+	assertSynchronization(t, c, SynchronizationUnavailable, nil)
+	if err := c.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RefreshSynchronization(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertSynchronization(t, c, SynchronizationSynchronized, &observedAt)
+	if err := c.RefreshSynchronization(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("later failure = %v", err)
+	}
+	assertSynchronization(t, c, SynchronizationStale, &observedAt)
+	if err := c.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RefreshSynchronization(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantRecovered := observedAt.Add(time.Minute)
+	assertSynchronization(t, c, SynchronizationUnsynchronized, &wantRecovered)
+	frames.mu.Lock()
+	frameCount := len(frames.frames)
+	frames.mu.Unlock()
+	if frameCount != 2 {
+		t.Fatalf("frames after degraded health = %d, want 2", frameCount)
+	}
+	waitForSynchronizationDiagnostics(t, diagnostics, 4)
+	diagnostics.mu.Lock()
+	defer diagnostics.mu.Unlock()
+	if len(diagnostics.records) != 4 {
+		t.Fatalf("diagnostic count = %d", len(diagnostics.records))
+	}
+	for _, record := range diagnostics.records {
+		if record.Operation == "" || record.Classification == "" {
+			t.Fatalf("unstable diagnostic = %+v", record)
+		}
+	}
+}
+
+func waitForSynchronizationDiagnostics(t *testing.T, diagnostics *synchronizationDiagnostics, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		diagnostics.mu.Lock()
+		count := len(diagnostics.records)
+		diagnostics.mu.Unlock()
+		if count >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("diagnostic count = %d, want at least %d", count, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+type blockingSynchronizationDiagnostics struct {
+	entered chan struct{}
+	block   chan struct{}
+}
+
+func (d *blockingSynchronizationDiagnostics) RecordSynchronization(SynchronizationDiagnostic) {
+	select {
+	case d.entered <- struct{}{}:
+	default:
+	}
+	<-d.block
+}
+
+func TestBlockingSynchronizationDiagnosticsDoNotBlockController(t *testing.T) {
+	state := mustState(t, 0, "UTC", 0, 9)
+	renderer, _ := render.New(10, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10000, BrightnessCeiling: 255})
+	diagnostics := &blockingSynchronizationDiagnostics{entered: make(chan struct{}, 1), block: make(chan struct{})}
+	c, err := NewRuntimeController(context.Background(), state, immediateStore{}, RuntimeOptions{
+		Clock:    &testSystemClock{samples: []clock.Sample{{Wall: time.Date(2026, 8, 20, 6, 0, 0, 0, time.UTC)}}},
+		Renderer: renderer, Frames: &frameCollector{}, Diagnostics: diagnostics,
+		Synchronization: synchronizationSourceFunc(func(context.Context) (SynchronizationObservation, error) {
+			return SynchronizationObservation{Classification: SynchronizationSynchronized, ObservedAt: time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	defer close(diagnostics.block)
+	if err := c.RefreshSynchronization(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-diagnostics.entered:
+	case <-time.After(time.Second):
+		t.Fatal("diagnostic recorder was not called")
+	}
+	if err := c.Tick(context.Background()); err != nil {
+		t.Fatalf("tick blocked by diagnostic: %v", err)
+	}
+	if _, err := c.RuntimeSnapshot(context.Background()); err != nil {
+		t.Fatalf("query blocked by diagnostic: %v", err)
+	}
+}
+
+func TestInvalidSynchronizationObservationsDegradeAndRetainLastKnown(t *testing.T) {
+	validAt := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	results := []SynchronizationObservation{
+		{Classification: SynchronizationClassification("invalid"), ObservedAt: validAt.Add(-time.Minute)},
+		{Classification: SynchronizationSynchronized, ObservedAt: validAt},
+		{Classification: SynchronizationClassification("invalid"), ObservedAt: validAt.Add(time.Minute)},
+	}
+	var mu sync.Mutex
+	source := synchronizationSourceFunc(func(context.Context) (SynchronizationObservation, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		result := results[0]
+		results = results[1:]
+		return result, nil
+	})
+	state := mustState(t, 0, "UTC", 0, 9)
+	renderer, _ := render.New(10, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10000, BrightnessCeiling: 255})
+	diagnostics := &synchronizationDiagnostics{}
+	c, err := NewRuntimeController(context.Background(), state, immediateStore{}, RuntimeOptions{Clock: &testSystemClock{}, Renderer: renderer, Frames: &frameCollector{}, Synchronization: source, Diagnostics: diagnostics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.RefreshSynchronization(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid synchronization classification") {
+		t.Fatalf("invalid initial observation error = %v", err)
+	}
+	assertSynchronization(t, c, SynchronizationUnavailable, nil)
+	if err := c.RefreshSynchronization(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RefreshSynchronization(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid synchronization classification") {
+		t.Fatalf("invalid later observation error = %v", err)
+	}
+	assertSynchronization(t, c, SynchronizationStale, &validAt)
+	waitForSynchronizationDiagnostics(t, diagnostics, 3)
+	diagnostics.mu.Lock()
+	defer diagnostics.mu.Unlock()
+	var unavailable, stale *SynchronizationDiagnostic
+	for i := range diagnostics.records {
+		record := &diagnostics.records[i]
+		switch record.Classification {
+		case SynchronizationUnavailable:
+			unavailable = record
+		case SynchronizationStale:
+			stale = record
+		}
+	}
+	if unavailable == nil || unavailable.Error == "" {
+		t.Fatalf("missing initial invalid diagnostic: %+v", diagnostics.records)
+	}
+	if stale == nil || stale.Observation != validAt || stale.Error == "" {
+		t.Fatalf("missing later invalid diagnostic: %+v", diagnostics.records)
+	}
+}
+
+func TestZeroSynchronizationObservationTimeIsRejected(t *testing.T) {
+	state := mustState(t, 0, "UTC", 0, 9)
+	renderer, _ := render.New(10, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10000, BrightnessCeiling: 255})
+	c, err := NewRuntimeController(context.Background(), state, immediateStore{}, RuntimeOptions{Clock: &testSystemClock{}, Renderer: renderer, Frames: &frameCollector{}, Synchronization: synchronizationSourceFunc(func(context.Context) (SynchronizationObservation, error) {
+		return SynchronizationObservation{Classification: SynchronizationUnknown}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.RefreshSynchronization(context.Background()); err == nil || !strings.Contains(err.Error(), "zero observation time") {
+		t.Fatalf("zero observation error = %v", err)
+	}
+	assertSynchronization(t, c, SynchronizationUnavailable, nil)
+}
+
+func TestQueuedSynchronizationCancellationIsSkippedAndCloseCancelsInFlightObservation(t *testing.T) {
+	state := mustState(t, 0, "UTC", 0, 9)
+	renderer, _ := render.New(10, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10000, BrightnessCeiling: 255})
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	canceled := make(chan struct{}, 1)
+	var callsMu sync.Mutex
+	calls := 0
+	source := synchronizationSourceFunc(func(ctx context.Context) (SynchronizationObservation, error) {
+		callsMu.Lock()
+		calls++
+		call := calls
+		callsMu.Unlock()
+		entered <- struct{}{}
+		if call > 1 {
+			<-ctx.Done()
+			canceled <- struct{}{}
+			return SynchronizationObservation{}, ctx.Err()
+		}
+		select {
+		case <-release:
+			return SynchronizationObservation{Classification: SynchronizationSynchronized, ObservedAt: time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)}, nil
+		case <-ctx.Done():
+			canceled <- struct{}{}
+			return SynchronizationObservation{}, ctx.Err()
+		}
+	})
+	c, err := NewRuntimeController(context.Background(), state, immediateStore{}, RuntimeOptions{Clock: &testSystemClock{}, Renderer: renderer, Frames: &frameCollector{}, Synchronization: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- c.RefreshSynchronization(context.Background()) }()
+	<-entered
+
+	queuedCtx, cancelQueued := context.WithCancel(context.Background())
+	queued := synchronizationRequest{ctx: queuedCtx, result: make(chan error, 1)}
+	c.synchronization <- queued
+	cancelQueued()
+	close(release)
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-queued.result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("queued cancellation = %v", err)
+	}
+	callsMu.Lock()
+	if calls != 1 {
+		t.Fatalf("source calls = %d, canceled queued request was executed", calls)
+	}
+	callsMu.Unlock()
+
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- c.RefreshSynchronization(context.Background()) }()
+	<-entered
+	c.Close()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("controller close did not cancel in-flight observation")
+	}
+}
+
+func assertSynchronization(t *testing.T, c *Controller, classification SynchronizationClassification, observedAt *time.Time) {
+	t.Helper()
+	snapshot, err := c.RuntimeSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Synchronization.Classification != classification {
+		t.Fatalf("health = %+v, want %s", snapshot.Synchronization, classification)
+	}
+	if observedAt == nil {
+		if snapshot.Synchronization.LastKnown != nil {
+			t.Fatalf("unexpected last known = %+v", snapshot.Synchronization.LastKnown)
+		}
+		return
+	}
+	if snapshot.Synchronization.LastKnown == nil || snapshot.Synchronization.LastKnown.ObservedAt != *observedAt {
+		t.Fatalf("last known = %+v, want %v", snapshot.Synchronization.LastKnown, *observedAt)
+	}
+	snapshot.Synchronization.LastKnown.Classification = SynchronizationUnknown
+	again, _ := c.RuntimeSnapshot(context.Background())
+	if again.Synchronization.LastKnown.Classification == SynchronizationUnknown {
+		t.Fatal("health snapshot aliases controller state")
+	}
+}
+
+func TestConcurrentSynchronizationRefreshTickAndRuntimeQueryTraffic(t *testing.T) {
+	const operations = 32
+	state := mustState(t, 0, "UTC", 0, 9)
+	samples := make([]clock.Sample, operations)
+	for i := range samples {
+		samples[i] = clock.Sample{
+			Wall:      time.Date(2026, 8, 20, i%24, 0, 0, 0, time.UTC),
+			Monotonic: time.Duration(i) * time.Second,
+		}
+	}
+	renderer, _ := render.New(10, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10000, BrightnessCeiling: 255})
+	var sourceMu sync.Mutex
+	sourceCalls := 0
+	source := synchronizationSourceFunc(func(ctx context.Context) (SynchronizationObservation, error) {
+		if err := ctx.Err(); err != nil {
+			return SynchronizationObservation{}, err
+		}
+		sourceMu.Lock()
+		call := sourceCalls
+		sourceCalls++
+		sourceMu.Unlock()
+		return SynchronizationObservation{
+			Classification: SynchronizationSynchronized,
+			ObservedAt:     time.Date(2026, 8, 20, 12, 0, call, 0, time.UTC),
+		}, nil
+	})
+	controller, err := NewRuntimeController(context.Background(), state, immediateStore{}, RuntimeOptions{
+		Clock:           &testSystemClock{samples: samples},
+		Renderer:        renderer,
+		Frames:          &frameCollector{},
+		Sun:             render.ArtificialSun{Color: render.Pixel{W: 255}, IntensityProfile: []uint8{255}},
+		Synchronization: source,
+		Diagnostics:     &synchronizationDiagnostics{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+
+	start := make(chan struct{})
+	errs := make(chan error, operations*3)
+	var wg sync.WaitGroup
+	for kind := 0; kind < 3; kind++ {
+		kind := kind
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range operations {
+				switch kind {
+				case 0:
+					errs <- controller.RefreshSynchronization(context.Background())
+				case 1:
+					errs <- controller.Tick(context.Background())
+				case 2:
+					snapshot, err := controller.RuntimeSnapshot(context.Background())
+					if err == nil && snapshot.Synchronization.LastKnown != nil {
+						snapshot.Synchronization.LastKnown.Classification = SynchronizationUnknown
+					}
+					errs <- err
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sourceMu.Lock()
+	calls := sourceCalls
+	sourceMu.Unlock()
+	if calls != operations {
+		t.Fatalf("synchronization calls = %d, want %d", calls, operations)
+	}
+	snapshot, err := controller.RuntimeSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantObserved := time.Date(2026, 8, 20, 12, 0, operations-1, 0, time.UTC)
+	if snapshot.Synchronization.Classification != SynchronizationSynchronized || snapshot.Synchronization.LastKnown == nil || snapshot.Synchronization.LastKnown.ObservedAt != wantObserved {
+		t.Fatalf("final synchronization health = %+v, want last observation %v", snapshot.Synchronization, wantObserved)
+	}
+	if snapshot.Position < 0 || snapshot.Frame.Len() != 10 {
+		t.Fatalf("runtime did not continue through concurrent refreshes: %+v", snapshot)
+	}
+}
+
 func (s *frameCollector) Submit(frame render.Frame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

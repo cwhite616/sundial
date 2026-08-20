@@ -21,20 +21,59 @@ var (
 type SystemClock interface{ Sample() clock.Sample }
 type FrameSubmitter interface{ Submit(render.Frame) error }
 
+type SynchronizationClassification string
+
+const (
+	SynchronizationUnknown        SynchronizationClassification = "unknown"
+	SynchronizationSynchronized   SynchronizationClassification = "synchronized"
+	SynchronizationUnsynchronized SynchronizationClassification = "unsynchronized"
+	SynchronizationStale          SynchronizationClassification = "stale"
+	SynchronizationUnavailable    SynchronizationClassification = "unavailable"
+)
+
+type SynchronizationObservation struct {
+	Classification SynchronizationClassification
+	ObservedAt     time.Time
+}
+
+type SynchronizationHealth struct {
+	Classification SynchronizationClassification
+	ObservedAt     time.Time
+	LastKnown      *SynchronizationObservation
+}
+
+type SynchronizationDiagnostic struct {
+	Operation      string
+	Classification SynchronizationClassification
+	Observation    time.Time
+	Error          string
+}
+
+type SynchronizationSource interface {
+	Observe(context.Context) (SynchronizationObservation, error)
+}
+
+type SynchronizationDiagnostics interface {
+	RecordSynchronization(SynchronizationDiagnostic)
+}
+
 type RuntimeOptions struct {
-	Clock    SystemClock
-	Renderer *render.Renderer
-	Frames   FrameSubmitter
-	Sun      render.ArtificialSun
+	Clock           SystemClock
+	Renderer        *render.Renderer
+	Frames          FrameSubmitter
+	Sun             render.ArtificialSun
+	Synchronization SynchronizationSource
+	Diagnostics     SynchronizationDiagnostics
 }
 
 type RuntimeSnapshot struct {
-	Device    DeviceState
-	Mode      clock.TimelineMode
-	Effective time.Time
-	Position  int
-	Sun       render.ArtificialSun
-	Frame     render.Frame
+	Device          DeviceState
+	Mode            clock.TimelineMode
+	Effective       time.Time
+	Position        int
+	Sun             render.ArtificialSun
+	Frame           render.Frame
+	Synchronization SynchronizationHealth
 }
 
 // DeviceStateStore is owned by the application consumer. Save must return
@@ -61,6 +100,17 @@ type timelineRequest struct {
 	result   chan error
 }
 
+type synchronizationRequest struct {
+	ctx    context.Context
+	result chan error
+}
+
+type synchronizationResult struct {
+	request     synchronizationRequest
+	observation SynchronizationObservation
+	err         error
+}
+
 type persistenceResult struct {
 	revision uint64
 	err      error
@@ -72,17 +122,19 @@ type pendingReplacement struct {
 }
 
 type Controller struct {
-	ctx             context.Context
-	cancel          context.CancelFunc
-	replace         chan replacementRequest
-	snapshot        chan snapshotRequest
-	runtimeSnapshot chan runtimeSnapshotRequest
-	tick            chan tickRequest
-	timeline        chan timelineRequest
-	complete        chan persistenceResult
-	done            chan struct{}
-	closeOnce       sync.Once
-	runtimeEnabled  bool
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	replace                 chan replacementRequest
+	snapshot                chan snapshotRequest
+	runtimeSnapshot         chan runtimeSnapshotRequest
+	tick                    chan tickRequest
+	timeline                chan timelineRequest
+	synchronization         chan synchronizationRequest
+	synchronizationComplete chan synchronizationResult
+	complete                chan persistenceResult
+	done                    chan struct{}
+	closeOnce               sync.Once
+	runtimeEnabled          bool
 }
 
 func NewController(parent context.Context, initial DeviceState, store DeviceStateStore) (*Controller, error) {
@@ -125,7 +177,32 @@ func newController(parent context.Context, initial DeviceState, store DeviceStat
 		return nil, fmt.Errorf("initialize device state controller: %w", err)
 	}
 	ctx, cancel := context.WithCancel(parent)
-	return &Controller{ctx: ctx, cancel: cancel, replace: make(chan replacementRequest), snapshot: make(chan snapshotRequest), complete: make(chan persistenceResult, 1), runtimeSnapshot: make(chan runtimeSnapshotRequest), tick: make(chan tickRequest), timeline: make(chan timelineRequest), done: make(chan struct{})}, nil
+	return &Controller{ctx: ctx, cancel: cancel, replace: make(chan replacementRequest), snapshot: make(chan snapshotRequest), complete: make(chan persistenceResult, 1), runtimeSnapshot: make(chan runtimeSnapshotRequest), tick: make(chan tickRequest), timeline: make(chan timelineRequest), synchronization: make(chan synchronizationRequest), synchronizationComplete: make(chan synchronizationResult), done: make(chan struct{})}, nil
+}
+
+func (c *Controller) RefreshSynchronization(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("refresh synchronization health: nil context")
+	}
+	if !c.runtimeEnabled {
+		return fmt.Errorf("refresh synchronization health: %w", ErrRuntimeUnavailable)
+	}
+	request := synchronizationRequest{ctx: ctx, result: make(chan error, 1)}
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("refresh synchronization health: %w", ctx.Err())
+	case <-c.done:
+		return ErrControllerClosed
+	case c.synchronization <- request:
+	}
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for synchronization health refresh: %w", ctx.Err())
+	case <-c.done:
+		return ErrControllerClosed
+	case err := <-request.result:
+		return err
+	}
 }
 
 func (c *Controller) Replace(ctx context.Context, replacement Replacement) error {
@@ -249,13 +326,17 @@ func (c *Controller) RuntimeSnapshot(ctx context.Context) (RuntimeSnapshot, erro
 func cloneRuntimeSnapshot(state RuntimeSnapshot) RuntimeSnapshot {
 	state.Sun.IntensityProfile = append([]uint8(nil), state.Sun.IntensityProfile...)
 	state.Frame = render.NewFrame(state.Frame.Pixels())
+	if state.Synchronization.LastKnown != nil {
+		last := *state.Synchronization.LastKnown
+		state.Synchronization.LastKnown = &last
+	}
 	return state
 }
 
 func clearedRuntimeSnapshot(device DeviceState, mode clock.TimelineMode, template render.ArtificialSun) RuntimeSnapshot {
 	template.Position = 0
 	template.IntensityProfile = append([]uint8(nil), template.IntensityProfile...)
-	return RuntimeSnapshot{Device: device, Mode: mode, Position: -1, Sun: template}
+	return RuntimeSnapshot{Device: device, Mode: mode, Position: -1, Sun: template, Synchronization: SynchronizationHealth{Classification: SynchronizationUnknown}}
 }
 
 func (c *Controller) Close() {
@@ -269,8 +350,11 @@ func (c *Controller) run(adopted DeviceState, store DeviceStateStore, runtime Ru
 	ownedSun := runtime.Sun
 	ownedSun.IntensityProfile = append([]uint8(nil), runtime.Sun.IntensityProfile...)
 	current := clearedRuntimeSnapshot(adopted, clock.TimelineAuto, ownedSun)
+	health := SynchronizationHealth{Classification: SynchronizationUnknown}
 	var queue []replacementRequest
 	var inFlight *pendingReplacement
+	var synchronizationQueue []synchronizationRequest
+	var synchronizationInFlight bool
 
 	startNext := func() {
 		for inFlight == nil && len(queue) > 0 {
@@ -305,9 +389,45 @@ func (c *Controller) run(adopted DeviceState, store DeviceStateStore, runtime Ru
 			}(candidate)
 		}
 	}
+	startSynchronization := func() {
+		if synchronizationInFlight {
+			return
+		}
+		var request synchronizationRequest
+		for len(synchronizationQueue) > 0 {
+			request = synchronizationQueue[0]
+			synchronizationQueue = synchronizationQueue[1:]
+			if err := request.ctx.Err(); err != nil {
+				request.result <- fmt.Errorf("refresh queued synchronization health: %w", err)
+				continue
+			}
+			break
+		}
+		if request.ctx == nil {
+			return
+		}
+		if isNilInterface(runtime.Synchronization) {
+			request.result <- fmt.Errorf("refresh synchronization health: %w", ErrRuntimeUnavailable)
+			return
+		}
+		synchronizationInFlight = true
+		go func() {
+			observeCtx, cancelObserve := context.WithCancel(c.ctx)
+			stopRequestCancellation := context.AfterFunc(request.ctx, cancelObserve)
+			defer cancelObserve()
+			defer stopRequestCancellation()
+			observation, err := runtime.Synchronization.Observe(observeCtx)
+			result := synchronizationResult{request: request, observation: observation, err: err}
+			select {
+			case c.synchronizationComplete <- result:
+			case <-c.ctx.Done():
+			}
+		}()
+	}
 
 	for {
 		startNext()
+		startSynchronization()
 		select {
 		case <-c.ctx.Done():
 			err := fmt.Errorf("device state controller stopped: %w", c.ctx.Err())
@@ -324,7 +444,44 @@ func (c *Controller) run(adopted DeviceState, store DeviceStateStore, runtime Ru
 			request.result <- adopted
 		case request := <-c.runtimeSnapshot:
 			current.Device = adopted
+			current.Synchronization = health
 			request.result <- cloneRuntimeSnapshot(current)
+		case request := <-c.synchronization:
+			synchronizationQueue = append(synchronizationQueue, request)
+		case result := <-c.synchronizationComplete:
+			synchronizationInFlight = false
+			diagnostic := SynchronizationDiagnostic{Operation: "refresh_synchronization"}
+			if result.err != nil {
+				if health.LastKnown == nil {
+					health.Classification = SynchronizationUnavailable
+				} else {
+					health.Classification = SynchronizationStale
+				}
+				diagnostic.Classification = health.Classification
+				diagnostic.Error = result.err.Error()
+				if health.LastKnown != nil {
+					diagnostic.Observation = health.LastKnown.ObservedAt
+				}
+				recordSynchronizationDiagnostic(runtime.Diagnostics, diagnostic)
+				result.request.result <- fmt.Errorf("refresh synchronization health: %w", result.err)
+				continue
+			}
+			if err := validateSynchronizationObservation(result.observation); err != nil {
+				health.Classification = SynchronizationUnavailable
+				if health.LastKnown != nil {
+					health.Classification = SynchronizationStale
+					diagnostic.Observation = health.LastKnown.ObservedAt
+				}
+				diagnostic.Classification, diagnostic.Error = health.Classification, err.Error()
+				recordSynchronizationDiagnostic(runtime.Diagnostics, diagnostic)
+				result.request.result <- fmt.Errorf("refresh synchronization health: %w", err)
+				continue
+			}
+			observation := result.observation
+			health = SynchronizationHealth{Classification: observation.Classification, ObservedAt: observation.ObservedAt, LastKnown: &observation}
+			diagnostic.Classification, diagnostic.Observation = observation.Classification, observation.ObservedAt
+			recordSynchronizationDiagnostic(runtime.Diagnostics, diagnostic)
+			result.request.result <- nil
 		case request := <-c.timeline:
 			if err := request.ctx.Err(); err != nil {
 				request.result <- fmt.Errorf("replace timeline: %w", err)
@@ -388,6 +545,26 @@ func (c *Controller) run(adopted DeviceState, store DeviceStateStore, runtime Ru
 			inFlight = nil
 		}
 	}
+}
+
+func validateSynchronizationObservation(observation SynchronizationObservation) error {
+	if observation.ObservedAt.IsZero() {
+		return errors.New("invalid synchronization observation: zero observation time")
+	}
+	if observation.Classification != SynchronizationSynchronized && observation.Classification != SynchronizationUnsynchronized && observation.Classification != SynchronizationUnknown {
+		return fmt.Errorf("invalid synchronization classification %q", observation.Classification)
+	}
+	return nil
+}
+
+func recordSynchronizationDiagnostic(recorder SynchronizationDiagnostics, diagnostic SynchronizationDiagnostic) {
+	if isNilInterface(recorder) {
+		return
+	}
+	go func() {
+		defer func() { _ = recover() }()
+		recorder.RecordSynchronization(diagnostic)
+	}()
 }
 
 func isNilStore(store DeviceStateStore) bool {

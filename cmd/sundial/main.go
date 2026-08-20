@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -14,6 +16,7 @@ import (
 	"github.com/cwhite616/sundial/internal/app"
 	"github.com/cwhite616/sundial/internal/clock"
 	"github.com/cwhite616/sundial/internal/render"
+	"github.com/cwhite616/sundial/internal/timesync"
 )
 
 const (
@@ -60,7 +63,21 @@ func (c systemClock) Sample() clock.Sample {
 }
 
 func runtimeControllerOptions(renderer *render.Renderer, frames app.FrameSubmitter, sun render.ArtificialSun) app.RuntimeOptions {
-	return app.RuntimeOptions{Clock: newSystemClock(), Renderer: renderer, Frames: frames, Sun: sun}
+	return app.RuntimeOptions{Clock: newSystemClock(), Renderer: renderer, Frames: frames, Sun: sun, Synchronization: timesync.NewTimedatectl(), Diagnostics: synchronizationDiagnosticRecorder{writer: os.Stderr}}
+}
+
+type synchronizationDiagnosticRecorder struct{ writer io.Writer }
+
+func (r synchronizationDiagnosticRecorder) RecordSynchronization(record app.SynchronizationDiagnostic) {
+	if r.writer == nil {
+		return
+	}
+	_ = json.NewEncoder(r.writer).Encode(struct {
+		Operation      string                            `json:"operation"`
+		Classification app.SynchronizationClassification `json:"classification"`
+		Observation    time.Time                         `json:"observation"`
+		Error          string                            `json:"error"`
+	}{record.Operation, record.Classification, record.Observation, record.Error})
 }
 
 const mappingStepHold = time.Second
