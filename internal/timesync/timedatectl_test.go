@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,5 +88,20 @@ func TestNewTimedatectlRejectsTypedNilRunner(t *testing.T) {
 	var runner *nilRunner
 	if _, err := NewTimedatectlWithRunner(runner, time.Now); err == nil {
 		t.Fatal("typed-nil runner was accepted")
+	}
+}
+
+func TestTimedatectlObserveRejectsUninitializedReceiver(t *testing.T) {
+	for _, source := range []*Timedatectl{nil, &Timedatectl{}} {
+		if _, err := source.Observe(context.Background()); err == nil || !strings.Contains(err.Error(), "not initialized") {
+			t.Fatalf("uninitialized source error = %v", err)
+		}
+	}
+}
+
+func TestExecRunnerPreservesCommandStderr(t *testing.T) {
+	_, err := (execRunner{}).Run(context.Background(), "sh", "-c", "printf 'system bus unavailable' >&2; exit 7")
+	if err == nil || !strings.Contains(err.Error(), "system bus unavailable") {
+		t.Fatalf("command error = %v", err)
 	}
 }

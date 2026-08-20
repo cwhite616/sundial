@@ -121,6 +121,67 @@ type pendingReplacement struct {
 	candidate DeviceState
 }
 
+type synchronizationDiagnosticDispatcher struct {
+	recorder SynchronizationDiagnostics
+	mu       sync.Mutex
+	ready    *sync.Cond
+	queue    []SynchronizationDiagnostic
+	closing  bool
+	done     chan struct{}
+}
+
+func newSynchronizationDiagnosticDispatcher(recorder SynchronizationDiagnostics) *synchronizationDiagnosticDispatcher {
+	if isNilInterface(recorder) {
+		return nil
+	}
+	d := &synchronizationDiagnosticDispatcher{recorder: recorder, done: make(chan struct{})}
+	d.ready = sync.NewCond(&d.mu)
+	go d.run()
+	return d
+}
+
+func (d *synchronizationDiagnosticDispatcher) enqueue(diagnostic SynchronizationDiagnostic) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.queue = append(d.queue, diagnostic)
+	d.ready.Signal()
+	d.mu.Unlock()
+}
+
+func (d *synchronizationDiagnosticDispatcher) close() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.closing = true
+	d.ready.Signal()
+	d.mu.Unlock()
+	<-d.done
+}
+
+func (d *synchronizationDiagnosticDispatcher) run() {
+	defer close(d.done)
+	for {
+		d.mu.Lock()
+		for len(d.queue) == 0 && !d.closing {
+			d.ready.Wait()
+		}
+		if len(d.queue) == 0 {
+			d.mu.Unlock()
+			return
+		}
+		diagnostic := d.queue[0]
+		d.queue = d.queue[1:]
+		d.mu.Unlock()
+		func() {
+			defer func() { _ = recover() }()
+			d.recorder.RecordSynchronization(diagnostic)
+		}()
+	}
+}
+
 type Controller struct {
 	ctx                     context.Context
 	cancel                  context.CancelFunc
@@ -346,6 +407,8 @@ func (c *Controller) Close() {
 
 func (c *Controller) run(adopted DeviceState, store DeviceStateStore, runtime RuntimeOptions) {
 	defer close(c.done)
+	diagnostics := newSynchronizationDiagnosticDispatcher(runtime.Diagnostics)
+	defer diagnostics.close()
 	timeline := clock.NewAutoTimeline()
 	ownedSun := runtime.Sun
 	ownedSun.IntensityProfile = append([]uint8(nil), runtime.Sun.IntensityProfile...)
@@ -399,6 +462,7 @@ func (c *Controller) run(adopted DeviceState, store DeviceStateStore, runtime Ru
 			synchronizationQueue = synchronizationQueue[1:]
 			if err := request.ctx.Err(); err != nil {
 				request.result <- fmt.Errorf("refresh queued synchronization health: %w", err)
+				request = synchronizationRequest{}
 				continue
 			}
 			break
@@ -417,6 +481,9 @@ func (c *Controller) run(adopted DeviceState, store DeviceStateStore, runtime Ru
 			defer cancelObserve()
 			defer stopRequestCancellation()
 			observation, err := runtime.Synchronization.Observe(observeCtx)
+			if requestErr := request.ctx.Err(); requestErr != nil {
+				observation, err = SynchronizationObservation{}, requestErr
+			}
 			result := synchronizationResult{request: request, observation: observation, err: err}
 			select {
 			case c.synchronizationComplete <- result:
@@ -462,7 +529,7 @@ func (c *Controller) run(adopted DeviceState, store DeviceStateStore, runtime Ru
 				if health.LastKnown != nil {
 					diagnostic.Observation = health.LastKnown.ObservedAt
 				}
-				recordSynchronizationDiagnostic(runtime.Diagnostics, diagnostic)
+				diagnostics.enqueue(diagnostic)
 				result.request.result <- fmt.Errorf("refresh synchronization health: %w", result.err)
 				continue
 			}
@@ -473,14 +540,14 @@ func (c *Controller) run(adopted DeviceState, store DeviceStateStore, runtime Ru
 					diagnostic.Observation = health.LastKnown.ObservedAt
 				}
 				diagnostic.Classification, diagnostic.Error = health.Classification, err.Error()
-				recordSynchronizationDiagnostic(runtime.Diagnostics, diagnostic)
+				diagnostics.enqueue(diagnostic)
 				result.request.result <- fmt.Errorf("refresh synchronization health: %w", err)
 				continue
 			}
 			observation := result.observation
 			health = SynchronizationHealth{Classification: observation.Classification, ObservedAt: observation.ObservedAt, LastKnown: &observation}
 			diagnostic.Classification, diagnostic.Observation = observation.Classification, observation.ObservedAt
-			recordSynchronizationDiagnostic(runtime.Diagnostics, diagnostic)
+			diagnostics.enqueue(diagnostic)
 			result.request.result <- nil
 		case request := <-c.timeline:
 			if err := request.ctx.Err(); err != nil {
@@ -555,16 +622,6 @@ func validateSynchronizationObservation(observation SynchronizationObservation) 
 		return fmt.Errorf("invalid synchronization classification %q", observation.Classification)
 	}
 	return nil
-}
-
-func recordSynchronizationDiagnostic(recorder SynchronizationDiagnostics, diagnostic SynchronizationDiagnostic) {
-	if isNilInterface(recorder) {
-		return
-	}
-	go func() {
-		defer func() { _ = recover() }()
-		recorder.RecordSynchronization(diagnostic)
-	}()
 }
 
 func isNilStore(store DeviceStateStore) bool {

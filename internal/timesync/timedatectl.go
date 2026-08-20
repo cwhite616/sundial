@@ -19,7 +19,17 @@ type CommandRunner interface {
 type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	output, err := exec.CommandContext(ctx, name, args...).Output()
+	if err == nil {
+		return output, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			return nil, fmt.Errorf("%w: %s", err, stderr)
+		}
+	}
+	return nil, err
 }
 
 type Timedatectl struct {
@@ -56,6 +66,9 @@ func isNilInterface(value any) bool {
 func (t *Timedatectl) Observe(ctx context.Context) (app.SynchronizationObservation, error) {
 	if ctx == nil {
 		return app.SynchronizationObservation{}, errors.New("query timedatectl synchronization: nil context")
+	}
+	if t == nil || isNilInterface(t.runner) || t.now == nil {
+		return app.SynchronizationObservation{}, errors.New("query timedatectl synchronization: source is not initialized")
 	}
 	output, err := t.runner.Run(ctx, "timedatectl", "show", "--property=NTPSynchronized", "--value")
 	if err != nil {

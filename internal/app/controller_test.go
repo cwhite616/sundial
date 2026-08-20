@@ -164,6 +164,31 @@ type blockingSynchronizationDiagnostics struct {
 	block   chan struct{}
 }
 
+type orderedSynchronizationDiagnostics struct {
+	mu         sync.Mutex
+	records    []SynchronizationDiagnostic
+	active     int
+	maxActive  int
+	firstDelay chan struct{}
+}
+
+func (d *orderedSynchronizationDiagnostics) RecordSynchronization(record SynchronizationDiagnostic) {
+	d.mu.Lock()
+	d.active++
+	if d.active > d.maxActive {
+		d.maxActive = d.active
+	}
+	index := len(d.records)
+	d.mu.Unlock()
+	if index == 0 && d.firstDelay != nil {
+		<-d.firstDelay
+	}
+	d.mu.Lock()
+	d.records = append(d.records, record)
+	d.active--
+	d.mu.Unlock()
+}
+
 func (d *blockingSynchronizationDiagnostics) RecordSynchronization(SynchronizationDiagnostic) {
 	select {
 	case d.entered <- struct{}{}:
@@ -201,6 +226,75 @@ func TestBlockingSynchronizationDiagnosticsDoNotBlockController(t *testing.T) {
 	}
 	if _, err := c.RuntimeSnapshot(context.Background()); err != nil {
 		t.Fatalf("query blocked by diagnostic: %v", err)
+	}
+}
+
+func TestSynchronizationDiagnosticsAreSerializedAndDrainedOnClose(t *testing.T) {
+	state := mustState(t, 0, "UTC", 0, 9)
+	renderer, _ := render.New(10, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10000, BrightnessCeiling: 255})
+	diagnostics := &orderedSynchronizationDiagnostics{firstDelay: make(chan struct{})}
+	observations := make(chan SynchronizationObservation, 2)
+	firstAt := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	observations <- SynchronizationObservation{Classification: SynchronizationSynchronized, ObservedAt: firstAt}
+	observations <- SynchronizationObservation{Classification: SynchronizationUnsynchronized, ObservedAt: firstAt.Add(time.Minute)}
+	c, err := NewRuntimeController(context.Background(), state, immediateStore{}, RuntimeOptions{
+		Clock: &testSystemClock{}, Renderer: renderer, Frames: &frameCollector{}, Diagnostics: diagnostics,
+		Synchronization: synchronizationSourceFunc(func(context.Context) (SynchronizationObservation, error) {
+			return <-observations, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RefreshSynchronization(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RefreshSynchronization(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	close(diagnostics.firstDelay)
+	c.Close()
+	diagnostics.mu.Lock()
+	defer diagnostics.mu.Unlock()
+	if diagnostics.maxActive != 1 {
+		t.Fatalf("concurrent diagnostic calls = %d", diagnostics.maxActive)
+	}
+	if len(diagnostics.records) != 2 || diagnostics.records[0].Classification != SynchronizationSynchronized || diagnostics.records[1].Classification != SynchronizationUnsynchronized {
+		t.Fatalf("diagnostic order = %+v", diagnostics.records)
+	}
+}
+
+func TestCanceledRefreshCannotAdoptSourceSuccess(t *testing.T) {
+	state := mustState(t, 0, "UTC", 0, 9)
+	renderer, _ := render.New(10, render.Safety{RedCurrent: 1, GreenCurrent: 1, BlueCurrent: 1, WhiteCurrent: 1, MaxStripCurrent: 10000, BrightnessCeiling: 255})
+	entered := make(chan struct{})
+	diagnostics := &synchronizationDiagnostics{}
+	c, err := NewRuntimeController(context.Background(), state, immediateStore{}, RuntimeOptions{
+		Clock: &testSystemClock{}, Renderer: renderer, Frames: &frameCollector{}, Diagnostics: diagnostics,
+		Synchronization: synchronizationSourceFunc(func(ctx context.Context) (SynchronizationObservation, error) {
+			close(entered)
+			<-ctx.Done()
+			return SynchronizationObservation{Classification: SynchronizationSynchronized, ObservedAt: time.Now()}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- c.RefreshSynchronization(ctx) }()
+	<-entered
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("refresh cancellation = %v", err)
+	}
+	waitForSynchronizationDiagnostics(t, diagnostics, 1)
+	assertSynchronization(t, c, SynchronizationUnavailable, nil)
+	diagnostics.mu.Lock()
+	defer diagnostics.mu.Unlock()
+	if diagnostics.records[0].Classification != SynchronizationUnavailable || !strings.Contains(diagnostics.records[0].Error, context.Canceled.Error()) {
+		t.Fatalf("canceled refresh diagnostic = %+v", diagnostics.records[0])
 	}
 }
 
@@ -311,9 +405,9 @@ func TestQueuedSynchronizationCancellationIsSkippedAndCloseCancelsInFlightObserv
 	<-entered
 
 	queuedCtx, cancelQueued := context.WithCancel(context.Background())
+	cancelQueued()
 	queued := synchronizationRequest{ctx: queuedCtx, result: make(chan error, 1)}
 	c.synchronization <- queued
-	cancelQueued()
 	close(release)
 	if err := <-firstResult; err != nil {
 		t.Fatal(err)
