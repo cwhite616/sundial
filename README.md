@@ -25,6 +25,10 @@ The first milestone is an adjustable cardboard or foam-core prototype that:
 
 A finished mount, API-based calibration, smart-home integrations, and weather effects are deferred until after the prototype works.
 
+### Prototype status
+
+The breadboard prototype is accepted and working. It uses a Raspberry Pi Zero 2 W, a 74AHCT125 level shifter, and approximately 120 active emitters from a 144-pixel SK6812 RGBW strip arranged in an approximately two-foot-tall half-circle. The accepted C2 calibration produces readable hour and half-hour shadows from 08:00 through 16:00 in a mostly dark room while keeping the cast-iron sundial visually primary. Exact mounting geometry, physical current measurements, and finished wiring presentation remain prototype limitations.
+
 ## Planned hardware
 
 - Raspberry Pi Zero W
